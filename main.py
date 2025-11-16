@@ -3,6 +3,10 @@ import os
 import time
 import fal_client
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configuration
 CSV_FILE = "Ten Archaeological Discoveries That Challenge the Timeline of Human History.csv"
@@ -13,7 +17,7 @@ RESULT_COLUMN_INDEX = 3  # Fourth column for results
 # Check for API key
 if not os.environ.get("FAL_KEY"):
     print("ERROR: FAL_KEY environment variable not set!")
-    print("Please set it with: set FAL_KEY=your_api_key_here")
+    print("Please set it in .env file: FAL_KEY=your_api_key_here")
     exit(1)
 
 # Create output directory if it doesn't exist
