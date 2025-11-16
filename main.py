@@ -71,11 +71,18 @@ def generate_image(prompt, output_filename):
         return None
 
 def main():
-    # Read CSV
+    # Read CSV with proper encoding handling
     rows = []
-    with open(CSV_FILE, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        rows = list(reader)
+    try:
+        with open(CSV_FILE, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+    except UnicodeDecodeError:
+        # Try with different encoding if utf-8 fails
+        print("UTF-8 failed, trying with latin-1 encoding...")
+        with open(CSV_FILE, 'r', encoding='latin-1') as f:
+            reader = csv.reader(f)
+            rows = list(reader)
     
     print(f"Total rows in CSV: {len(rows)}")
     
@@ -138,8 +145,8 @@ def main():
         # Small delay to avoid rate limiting
         time.sleep(1)
     
-    # Write updated CSV
-    with open(CSV_FILE, 'w', encoding='utf-8', newline='') as f:
+    # Write updated CSV (use utf-8-sig to preserve special characters)
+    with open(CSV_FILE, 'w', encoding='utf-8-sig', newline='') as f:
         writer = csv.writer(f)
         writer.writerows(rows)
     
