@@ -10,8 +10,17 @@ OUTPUT_DIR = "generated_images"
 PROMPT_COLUMN_INDEX = 2  # Third column (0-indexed)
 RESULT_COLUMN_INDEX = 3  # Fourth column for results
 
+# Check for API key
+if not os.environ.get("FAL_KEY"):
+    print("ERROR: FAL_KEY environment variable not set!")
+    print("Please set it with: set FAL_KEY=your_api_key_here")
+    exit(1)
+
 # Create output directory if it doesn't exist
 Path(OUTPUT_DIR).mkdir(exist_ok=True)
+
+print(f"Using FAL_KEY: {os.environ.get('FAL_KEY')[:10]}...")
+print(f"Output directory: {OUTPUT_DIR}")
 
 def should_skip_row(row):
     """Check if row should be skipped (starts with 'Scene #')"""
