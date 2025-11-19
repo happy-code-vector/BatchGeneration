@@ -132,45 +132,90 @@ def main():
             results = {}
             output_path = os.path.join(OUTPUT_DIR, "batch_results.txt")
             
-            with open(output_path, 'w', encoding='utf-8') as f:
-                for idx, task in enumerate(task_metadata):
-                    # Note: In real implementation, you'd retrieve actual results from batch_status
-                    # This is a placeholder showing the structure
-                    f.write(f"Scene {task['scene_number']}: {task['prompt']}\n")
-                    f.write(f"Result stored in batch job: {batch_job.name}\n\n")
+            # Check if results are inline or in a file
+            if batch_status.dest and batch_status.dest.inlined_responses:
+                print("Processing inline results...")
+                
+                success_count = 0
+                error_count = 0
+                
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(f"GEMINI BATCH API RESULTS\n")
+                    f.write(f"Batch Job: {batch_job.name}\n")
+                    f.write(f"Total Requests: {len(batch_requests)}\n")
+                    f.write(f"{'='*80}\n\n")
                     
+                    # Extract responses from the batch job
+                    for i, inline_response in enumerate(batch_status.dest.inlined_responses):
+                        task = task_metadata[i]
+                        scene_num = task['scene_number']
+                        
+                        f.write(f"\n{'='*80}\n")
+                        f.write(f"SCENE {scene_num}\n")
+                        f.write(f"{'='*80}\n\n")
+                        f.write(f"PROMPT:\n{task['prompt']}\n\n")
+                        f.write(f"{'-'*80}\n")
+                        f.write(f"RESPONSE:\n{'-'*80}\n\n")
+                        
+                        # Check for a successful response
+                        if inline_response.response:
+                            try:
+                                response_text = inline_response.response.text
+                                f.write(response_text)
+                                f.write(f"\n\n[STATUS: SUCCESS]\n")
+                                success_count += 1
+                            except AttributeError:
+                                # Fallback if .text doesn't exist
+                                f.write(str(inline_response.response))
+                                f.write(f"\n\n[STATUS: SUCCESS - fallback format]\n")
+                                success_count += 1
+                        elif inline_response.error:
+                            f.write(f"ERROR: {inline_response.error}\n")
+                            f.write(f"\n[STATUS: ERROR]\n")
+                            error_count += 1
+                        else:
+                            f.write(f"ERROR: No response received\n")
+                            f.write(f"\n[STATUS: ERROR]\n")
+                            error_count += 1
+                    
+                    # Summary at the end
+                    f.write(f"\n\n{'='*80}\n")
+                    f.write(f"SUMMARY\n")
+                    f.write(f"{'='*80}\n")
+                    f.write(f"Total: {len(batch_requests)}\n")
+                    f.write(f"Success: {success_count}\n")
+                    f.write(f"Errors: {error_count}\n")
+                
+                print(f"✓ All responses saved to: {output_path}")
+                print(f"Success: {success_count} | Errors: {error_count}")
+            
+            elif batch_status.dest and batch_status.dest.file_name:
+                print(f"Results are in file: {batch_status.dest.file_name}")
+                print("Downloading result file content...")
+                file_content = client.files.download(file=batch_status.dest.file_name)
+                
+                with open(output_path, 'wb') as f:
+                    f.write(file_content)
+                
+                print(f"Results downloaded to: {output_path}")
+                # For file-based results, mark all as successful
+                for task in task_metadata:
                     results[task["row_index"]] = {
                         "scene_number": task["scene_number"],
-                        "batch_job": batch_job.name,
+                        "response": f"See file: {output_path}",
                         "success": True
                     }
-            
-            # Update CSV with results
-            print(f"\nUpdating CSV with batch results...")
-            
-            for row_index, result in results.items():
-                row = rows[row_index]
-                
-                # Ensure result column exists
-                while len(row) <= RESULT_COLUMN_INDEX:
-                    row.append("")
-                
-                row[RESULT_COLUMN_INDEX] = f"BATCH_JOB: {result['batch_job']}"
-            
-            # Write updated CSV
-            with open(CSV_FILE, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerows(rows)
+            else:
+                print("No results found (neither file nor inline).")
+                return
             
             elapsed_time = time.time() - start_time
             
             print(f"\n{'='*50}")
             print(f"Batch processing complete!")
-            print(f"Total requests processed: {len(results)}/{len(batch_requests)}")
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
             print(f"Batch job name: {batch_job.name}")
-            print(f"Results saved to: {output_path}")
-            print(f"CSV updated with batch job reference")
+            print(f"Results file: {output_path}")
             print(f"\n💰 Cost savings: 50% discount applied via batch mode!")
             
         else:
