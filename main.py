@@ -1,6 +1,7 @@
 import csv
 import os
 import time
+from datetime import datetime
 from google import genai
 from google.genai.types import *
 from pathlib import Path
@@ -13,7 +14,8 @@ load_dotenv()
 
 # Configuration
 CSV_FILE = "Ten Archaeological Discoveries That Challenge the Timeline of Human History.csv"
-OUTPUT_DIR = "generated_images"
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUTPUT_DIR = f"generated_images_{timestamp}"
 PROMPT_COLUMN_INDEX = 2  # Third column (0-indexed)
 RESULT_COLUMN_INDEX = 3  # Fourth column for results
 
