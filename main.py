@@ -41,6 +41,77 @@ def should_skip_row(row):
     first_cell = str(row[0]).strip()
     return first_cell.startswith("Scene #") or first_cell == "Scene #"
 
+def create_slideshow_video(output_dir, duration_per_image=3):
+    """Create a slideshow video from generated images using ffmpeg"""
+    import subprocess
+    import glob
+    
+    print(f"\n{'='*50}")
+    print("Creating slideshow video with ffmpeg...")
+    
+    # Get all PNG files sorted by scene number
+    image_files = sorted(glob.glob(os.path.join(output_dir, "scene_*.png")))
+    
+    if not image_files:
+        print("No images found to create video")
+        return None
+    
+    print(f"Found {len(image_files)} images")
+    
+    # Create a file list for ffmpeg
+    filelist_path = os.path.join(output_dir, "filelist.txt")
+    with open(filelist_path, 'w') as f:
+        for img in image_files:
+            # ffmpeg concat format: file 'path' and duration
+            f.write(f"file '{os.path.basename(img)}'\n")
+            f.write(f"duration {duration_per_image}\n")
+        # Add last image again without duration for proper ending
+        if image_files:
+            f.write(f"file '{os.path.basename(image_files[-1])}'\n")
+    
+    # Output video path
+    video_output = os.path.join(output_dir, "slideshow.mp4")
+    
+    # ffmpeg command with crossfade transitions
+    cmd = [
+        'ffmpeg',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', filelist_path,
+        '-vf', 'fps=30,format=yuv420p',
+        '-c:v', 'libx264',
+        '-crf', '23',
+        '-y',  # Overwrite output file
+        video_output
+    ]
+    
+    try:
+        # Run ffmpeg
+        result = subprocess.run(
+            cmd,
+            cwd=output_dir,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            print(f"✓ Video created: {video_output}")
+            print(f"Duration per image: {duration_per_image} seconds")
+            print(f"Total video length: ~{len(image_files) * duration_per_image} seconds")
+            return video_output
+        else:
+            print(f"✗ ffmpeg error: {result.stderr}")
+            return None
+            
+    except FileNotFoundError:
+        print("✗ ffmpeg not found. Please install ffmpeg:")
+        print("  Windows: choco install ffmpeg  OR  download from ffmpeg.org")
+        print("  Or run manually: ffmpeg -f concat -safe 0 -i filelist.txt -vf fps=30 -c:v libx264 slideshow.mp4")
+        return None
+    except Exception as e:
+        print(f"✗ Error creating video: {e}")
+        return None
+
 def main():
     start_time = time.time()
     
@@ -255,6 +326,10 @@ def main():
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
             print(f"Batch job name: {batch_job.name}")
             print(f"\n💰 Cost savings: 50% discount applied via batch mode!")
+            
+            # Create slideshow video if images were generated
+            if success_count > 0:
+                create_slideshow_video(OUTPUT_DIR, duration_per_image=3)
             
         else:
             print(f"\n✗ Batch failed with status: {batch_status.state.name}")
