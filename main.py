@@ -5,6 +5,8 @@ from google import genai
 from google.genai.types import *
 from pathlib import Path
 from dotenv import load_dotenv
+from PIL import Image
+import io
 
 # Load environment variables from .env file
 load_dotenv()
@@ -157,26 +159,58 @@ def main():
                         f.write(f"{'-'*80}\n")
                         f.write(f"RESPONSE:\n{'-'*80}\n\n")
                         
-                        # Check for a successful response
+                        # Check for a successful response with image data
                         if inline_response.response:
                             try:
-                                response_text = inline_response.response.text
-                                f.write(response_text)
-                                f.write(f"\n\n[STATUS: SUCCESS]\n")
-                                success_count += 1
-                            except AttributeError:
-                                # Fallback if .text doesn't exist
-                                f.write(str(inline_response.response))
-                                f.write(f"\n\n[STATUS: SUCCESS - fallback format]\n")
-                                success_count += 1
+                                # Extract image parts from response
+                                image_parts = [
+                                    part.inline_data.data
+                                    for part in inline_response.response.parts
+                                    if part.inline_data
+                                ]
+                                
+                                if image_parts:
+                                    # Save the image
+                                    image_path = os.path.join(OUTPUT_DIR, task['output_filename'])
+                                    
+                                    # Get the first part with image data
+                                    for part in inline_response.response.parts:
+                                        if part.inline_data:
+                                            image = part.as_image()
+                                            image.save(image_path)
+                                            break
+                                    
+                                    f.write(f"Image saved: {image_path}\n")
+                                    f.write(f"[STATUS: SUCCESS]\n")
+                                    success_count += 1
+                                    print(f"  ✓ Scene {scene_num}: {image_path}")
+                                else:
+                                    # No image data, might be text response
+                                    try:
+                                        response_text = inline_response.response.text
+                                        f.write(f"Text response: {response_text}\n")
+                                        f.write(f"[STATUS: SUCCESS - text only]\n")
+                                        success_count += 1
+                                    except:
+                                        f.write(f"No image data found\n")
+                                        f.write(f"[STATUS: ERROR]\n")
+                                        error_count += 1
+                                        
+                            except Exception as e:
+                                f.write(f"ERROR processing response: {e}\n")
+                                f.write(f"[STATUS: ERROR]\n")
+                                error_count += 1
+                                print(f"  ✗ Scene {scene_num}: {e}")
                         elif inline_response.error:
                             f.write(f"ERROR: {inline_response.error}\n")
-                            f.write(f"\n[STATUS: ERROR]\n")
+                            f.write(f"[STATUS: ERROR]\n")
                             error_count += 1
+                            print(f"  ✗ Scene {scene_num}: {inline_response.error}")
                         else:
                             f.write(f"ERROR: No response received\n")
-                            f.write(f"\n[STATUS: ERROR]\n")
+                            f.write(f"[STATUS: ERROR]\n")
                             error_count += 1
+                            print(f"  ✗ Scene {scene_num}: No response")
                     
                     # Summary at the end
                     f.write(f"\n\n{'='*80}\n")
@@ -186,7 +220,8 @@ def main():
                     f.write(f"Success: {success_count}\n")
                     f.write(f"Errors: {error_count}\n")
                 
-                print(f"✓ All responses saved to: {output_path}")
+                print(f"\n✓ Summary saved to: {output_path}")
+                print(f"✓ Images saved to: {OUTPUT_DIR}/")
                 print(f"Success: {success_count} | Errors: {error_count}")
             
             elif batch_status.dest and batch_status.dest.file_name:
@@ -212,10 +247,9 @@ def main():
             elapsed_time = time.time() - start_time
             
             print(f"\n{'='*50}")
-            print(f"Batch processing complete!")
+            print(f"Batch image generation complete!")
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
             print(f"Batch job name: {batch_job.name}")
-            print(f"Results file: {output_path}")
             print(f"\n💰 Cost savings: 50% discount applied via batch mode!")
             
         else:
