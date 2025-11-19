@@ -120,9 +120,11 @@ def main():
         print(f"\nWaiting for batch to complete...")
         
         # Poll for completion
+        count = 0
         while True:
             batch_status = client.batches.get(name=batch_job.name)
-            print(f"Status: {batch_status.state}")
+            print(f"Status: {batch_status.state}-{count}")
+            count = count + 1
             
             if batch_status.state.name in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
                 break
