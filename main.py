@@ -41,13 +41,14 @@ def should_skip_row(row):
     first_cell = str(row[0]).strip()
     return first_cell.startswith("Scene #") or first_cell == "Scene #"
 
-def create_slideshow_video(output_dir, duration_per_image=3):
-    """Create a slideshow video from generated images using ffmpeg"""
-    import subprocess
+def create_slideshow_video(output_dir, duration_per_image=3, fps=30):
+    """Create a slideshow video from generated images using OpenCV"""
     import glob
+    import cv2
+    import numpy as np
     
     print(f"\n{'='*50}")
-    print("Creating slideshow video with ffmpeg...")
+    print("Creating slideshow video with OpenCV...")
     
     # Get all PNG files sorted by scene number
     image_files = sorted(glob.glob(os.path.join(output_dir, "scene_*.png")))
@@ -58,58 +59,59 @@ def create_slideshow_video(output_dir, duration_per_image=3):
     
     print(f"Found {len(image_files)} images")
     
-    # Create a file list for ffmpeg
-    filelist_path = os.path.join(output_dir, "filelist.txt")
-    with open(filelist_path, 'w') as f:
-        for img in image_files:
-            # ffmpeg concat format: file 'path' and duration
-            f.write(f"file '{os.path.basename(img)}'\n")
-            f.write(f"duration {duration_per_image}\n")
-        # Add last image again without duration for proper ending
-        if image_files:
-            f.write(f"file '{os.path.basename(image_files[-1])}'\n")
+    # Read first image to get dimensions
+    first_img = cv2.imread(image_files[0])
+    if first_img is None:
+        print("Error reading first image")
+        return None
+    
+    height, width = first_img.shape[:2]
     
     # Output video path
     video_output = os.path.join(output_dir, "slideshow.mp4")
     
-    # ffmpeg command with crossfade transitions
-    cmd = [
-        'ffmpeg',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', filelist_path,
-        '-vf', 'fps=30,format=yuv420p',
-        '-c:v', 'libx264',
-        '-crf', '23',
-        '-y',  # Overwrite output file
-        video_output
-    ]
+    # Create video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    video_writer = cv2.VideoWriter(video_output, fourcc, fps, (width, height))
+    
+    if not video_writer.isOpened():
+        print("Error creating video writer")
+        return None
     
     try:
-        # Run ffmpeg
-        result = subprocess.run(
-            cmd,
-            cwd=output_dir,
-            capture_output=True,
-            text=True
-        )
+        frames_per_image = int(duration_per_image * fps)
         
-        if result.returncode == 0:
-            print(f"✓ Video created: {video_output}")
-            print(f"Duration per image: {duration_per_image} seconds")
-            print(f"Total video length: ~{len(image_files) * duration_per_image} seconds")
-            return video_output
-        else:
-            print(f"✗ ffmpeg error: {result.stderr}")
-            return None
+        for i, img_path in enumerate(image_files):
+            print(f"  Processing image {i+1}/{len(image_files)}: {os.path.basename(img_path)}")
             
-    except FileNotFoundError:
-        print("✗ ffmpeg not found. Please install ffmpeg:")
-        print("  Windows: choco install ffmpeg  OR  download from ffmpeg.org")
-        print("  Or run manually: ffmpeg -f concat -safe 0 -i filelist.txt -vf fps=30 -c:v libx264 slideshow.mp4")
-        return None
+            # Read image
+            img = cv2.imread(img_path)
+            if img is None:
+                print(f"  Warning: Could not read {img_path}, skipping")
+                continue
+            
+            # Resize if dimensions don't match
+            if img.shape[:2] != (height, width):
+                img = cv2.resize(img, (width, height))
+            
+            # Write the same frame multiple times for duration
+            for _ in range(frames_per_image):
+                video_writer.write(img)
+        
+        video_writer.release()
+        
+        total_duration = len(image_files) * duration_per_image
+        print(f"\n✓ Video created: {video_output}")
+        print(f"Resolution: {width}x{height}")
+        print(f"FPS: {fps}")
+        print(f"Duration per image: {duration_per_image} seconds")
+        print(f"Total video length: {total_duration} seconds ({total_duration/60:.1f} minutes)")
+        
+        return video_output
+        
     except Exception as e:
         print(f"✗ Error creating video: {e}")
+        video_writer.release()
         return None
 
 def main():

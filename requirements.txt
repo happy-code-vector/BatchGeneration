@@ -2,3 +2,4 @@ google-genai
 requests
 python-dotenv
 Pillow
+opencv-python
