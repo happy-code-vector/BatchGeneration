@@ -210,3 +210,5 @@ __marimo__/
 *.xlsx
 generated_images*/
 *.zip
+
+.claude
