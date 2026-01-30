@@ -14,12 +14,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from PIL import Image
 import io
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-CSV_FILE = "NBP Image Prompts Couples.csv"
+CSV_FILE = "simpler.csv"
 BATCH_SIZE = 50  # Gemini batch API limit
 OUTPUT_DIR_TEMPLATE = "generated_images_{timestamp}"
 
@@ -128,6 +130,114 @@ def list_batches(prompts: list, batch_size: int):
         print()
 
     return total_batches
+
+
+def worker_process_batch(args):
+    """Worker function for parallel processing - must be pickle-able"""
+    batch, output_dir, batch_num, total_batches, api_key = args
+
+    # Initialize client in this process
+    from google import genai
+    worker_client = genai.Client(api_key=api_key)
+
+    print(f"\n[Worker {batch_num}] Starting Batch {batch_num}/{total_batches} ({len(batch)} images)")
+
+    # Prepare batch requests
+    batch_requests = []
+    task_metadata = []
+
+    for item in batch:
+        combined_prompt = f"Style: {item['style']}. {item['prompt']}"
+        filename = f"row_{item['row_index']}_{item['safe_style']}.png"
+
+        batch_requests.append({
+            "contents": [{
+                "parts": [{"text": combined_prompt}],
+                "role": "user"
+            }]
+        })
+
+        task_metadata.append({
+            "row_index": item['row_index'],
+            "style": item['style'],
+            "safe_style": item['safe_style'],
+            "prompt": item['prompt'],
+            "combined_prompt": combined_prompt,
+            "output_filename": filename
+        })
+
+    # Create batch job
+    try:
+        batch_job = worker_client.batches.create(
+            model="models/gemini-2.5-flash-image",
+            src=batch_requests,
+            config={
+                "display_name": f"nano-banana-batch-{batch_num}",
+            },
+        )
+
+        print(f"[Worker {batch_num}] Created batch job: {batch_job.name}")
+
+        # Poll for completion
+        count = 0
+        while True:
+            batch_status = worker_client.batches.get(name=batch_job.name)
+            count += 1
+
+            if batch_status.state.name in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
+                break
+
+            time.sleep(10)
+
+        # Process results
+        success_count = 0
+        error_count = 0
+
+        if batch_status.state.name == "JOB_STATE_SUCCEEDED":
+            if batch_status.dest and batch_status.dest.inlined_responses:
+                for i, inline_response in enumerate(batch_status.dest.inlined_responses):
+                    task = task_metadata[i]
+
+                    if inline_response.response:
+                        try:
+                            for part in inline_response.response.parts:
+                                if part.inline_data:
+                                    image_path = os.path.join(output_dir, task['output_filename'])
+                                    image = part.as_image()
+                                    image.save(image_path)
+
+                                    # Save prompt info
+                                    prompt_file = os.path.join(output_dir, f"{task['output_filename']}.prompt.txt")
+                                    with open(prompt_file, 'w', encoding='utf-8') as f:
+                                        f.write(f"Style: {task['style']}\n")
+                                        f.write(f"Prompt: {task['prompt']}\n")
+                                        f.write(f"Combined: {task['combined_prompt']}\n")
+                                        f.write(f"Row Index: {task['row_index']}\n")
+                                        f.write(f"Filename: {task['output_filename']}\n")
+
+                                    success_count += 1
+                                    break
+                        except Exception as e:
+                            error_count += 1
+                    else:
+                        error_count += 1
+
+        return {
+            'batch_num': batch_num,
+            'success': success_count,
+            'errors': error_count,
+            'total': len(batch_requests)
+        }
+
+    except Exception as e:
+        print(f"[Worker {batch_num}] Error: {e}")
+        return {
+            'batch_num': batch_num,
+            'success': 0,
+            'errors': len(batch_requests),
+            'total': len(batch_requests),
+            'error': str(e)
+        }
 
 
 def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: int):
@@ -372,6 +482,12 @@ def main():
         type=int,
         help='Number of images to generate (e.g., 10, 50, 100). Overrides --batch option.'
     )
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=1,
+        help='Number of parallel workers for batch processing (default: 1). Use 0 for auto-detect.'
+    )
 
     args = parser.parse_args()
 
@@ -465,16 +581,59 @@ def main():
     output_dir = create_output_dir()
     print(f"\nOutput directory: {output_dir}")
 
+    # Determine number of workers
+    if args.workers == 0:
+        num_workers = min(multiprocessing.cpu_count(), len(batches_to_process))
+        print(f"Auto-detected {num_workers} CPU cores, using {num_workers} workers")
+    else:
+        num_workers = min(args.workers, len(batches_to_process))
+        print(f"Using {num_workers} parallel workers")
+
     # Process batches
     start_time = time.time()
     all_results = []
 
-    for batch_idx in batches_to_process:
-        batch = batches[batch_idx]
-        batch_num = batch_idx + 1
+    if num_workers > 1:
+        # Parallel processing
+        print(f"\nProcessing {len(batches_to_process)} batches in parallel...\n")
 
-        result = process_batch(batch, output_dir, batch_num, total_batches)
-        all_results.append(result)
+        # Prepare arguments for workers
+        api_key = os.environ.get("GEMINI_API_KEY")
+        worker_args = [
+            (batches[batch_idx], output_dir, batch_idx + 1, total_batches, api_key)
+            for batch_idx in batches_to_process
+        ]
+
+        # Process in parallel
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(worker_process_batch, arg): arg[2] for arg in worker_args}
+
+            for future in as_completed(futures):
+                batch_num = futures[future]
+                try:
+                    result = future.result()
+                    all_results.append(result)
+                except Exception as e:
+                    print(f"\n[Worker {batch_num}] Exception: {e}")
+                    all_results.append({
+                        'batch_num': batch_num,
+                        'success': 0,
+                        'errors': 1,
+                        'total': 1,
+                        'error': str(e)
+                    })
+
+        # Sort results by batch number
+        all_results.sort(key=lambda x: x['batch_num'])
+
+    else:
+        # Serial processing (original behavior)
+        for batch_idx in batches_to_process:
+            batch = batches[batch_idx]
+            batch_num = batch_idx + 1
+
+            result = process_batch(batch, output_dir, batch_num, total_batches)
+            all_results.append(result)
 
     # Save results
     save_results(output_dir, all_results, len(prompts))
