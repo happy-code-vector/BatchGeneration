@@ -177,11 +177,13 @@ def worker_process_batch(args):
         )
 
         print(f"[Worker {batch_num}] Created batch job: {batch_job.name}")
+        print(f"[Worker {batch_num}] Waiting for batch to complete...")
 
         # Poll for completion
         count = 0
         while True:
             batch_status = worker_client.batches.get(name=batch_job.name)
+            print(f"[Worker {batch_num}] Status: {batch_status.state.name} ({count})")
             count += 1
 
             if batch_status.state.name in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
