@@ -21,7 +21,7 @@ import multiprocessing
 load_dotenv()
 
 # Configuration
-CSV_FILE = "simpler.csv"
+CSV_FILE = "NBP Image Prompts Couples - Sheet1.csv"
 BATCH_SIZE = 50  # Gemini batch API limit
 OUTPUT_DIR_TEMPLATE = "generated_images_{timestamp}"
 
