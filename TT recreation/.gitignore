@@ -1,0 +1,26 @@
+# Downloaded TikTok slides
+downloaded_slides_*/
+
+# Generated images
+generated_images_*/
+
+# Debug files
+_debug_*.txt
+_debug_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
