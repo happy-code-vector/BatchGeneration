@@ -798,7 +798,7 @@ def get_batches(prompts: list, batch_size: int) -> list:
     return batches
 
 
-def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: int):
+def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: int, total_variations: int = 1):
     """Process a single batch using Gemini batch API"""
     print(f"\n{'='*60}")
     print(f"Processing Batch {batch_num}/{total_batches} ({len(batch)} images)")
@@ -811,12 +811,17 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
     for item in batch:
         prompt_text = item['prompt']
         variation = item.get('variation', 1)
+        slide_num = item['slide_num']
 
-        # Include variation number in filename if generating multiple variations
-        if variation > 1 or item.get('total_variations', 1) > 1:
-            filename = f"slide_{item['slide_num']:02d}_var{variation:02d}.png"
+        # Create subdirectory for each slide
+        slide_dir = os.path.join(output_dir, f"slide_{slide_num:02d}")
+        Path(slide_dir).mkdir(exist_ok=True)
+
+        # Filename format depends on variations
+        if total_variations > 1:
+            filename = f"var_{variation:02d}.png"
         else:
-            filename = f"slide_{item['slide_num']:02d}.png"
+            filename = f"slide_{slide_num:02d}.png"
 
         batch_requests.append({
             "contents": [{
@@ -826,10 +831,11 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
         })
 
         task_metadata.append({
-            "slide_num": item['slide_num'],
+            "slide_num": slide_num,
             "variation": variation,
             "prompt": prompt_text,
             "output_filename": filename,
+            "slide_dir": slide_dir,
             "original_image": item.get('original_image', '')
         })
 
@@ -873,8 +879,10 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
                 for i, inline_response in enumerate(batch_status.dest.inlined_responses):
                     task = task_metadata[i]
                     slide_num = task['slide_num']
+                    variation = task.get('variation', 1)
+                    slide_dir = task.get('slide_dir', output_dir)
 
-                    print(f"  Processing slide {slide_num}...")
+                    print(f"  Processing slide {slide_num}, variation {variation}...")
 
                     if inline_response.response:
                         try:
@@ -885,7 +893,7 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
                             ]
 
                             if image_parts:
-                                image_path = os.path.join(output_dir, task['output_filename'])
+                                image_path = os.path.join(slide_dir, task['output_filename'])
 
                                 for part in inline_response.response.parts:
                                     if part.inline_data:
@@ -894,14 +902,15 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
                                         break
 
                                 # Save prompt info
-                                prompt_file = os.path.join(output_dir, f"{task['output_filename']}.prompt.txt")
+                                prompt_file = os.path.join(slide_dir, f"{task['output_filename']}.prompt.txt")
                                 with open(prompt_file, 'w', encoding='utf-8') as f:
                                     f.write(f"Source: TikTok Slideshow\n")
                                     f.write(f"Original Slide: {slide_num}\n")
+                                    f.write(f"Variation: {variation}\n")
                                     f.write(f"Original Image: {task['original_image']}\n")
                                     f.write(f"---\n\nVision Prompt:\n{task['prompt']}\n")
 
-                                print(f"    Saved: {task['output_filename']}")
+                                print(f"    Saved: {os.path.basename(slide_dir)}/{task['output_filename']}")
                                 success_count += 1
                             else:
                                 print(f"    No image data in response")
@@ -1222,7 +1231,7 @@ def main():
 
     for batch_idx, batch in enumerate(batches):
         batch_num = batch_idx + 1
-        result = process_batch(batch, str(generated_dir), batch_num, total_batches)
+        result = process_batch(batch, str(generated_dir), batch_num, total_batches, args.variations)
         all_results.append(result)
 
     # Save results
