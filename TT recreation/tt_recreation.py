@@ -810,7 +810,13 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
 
     for item in batch:
         prompt_text = item['prompt']
-        filename = f"slide_{item['slide_num']:02d}.png"
+        variation = item.get('variation', 1)
+
+        # Include variation number in filename if generating multiple variations
+        if variation > 1 or item.get('total_variations', 1) > 1:
+            filename = f"slide_{item['slide_num']:02d}_var{variation:02d}.png"
+        else:
+            filename = f"slide_{item['slide_num']:02d}.png"
 
         batch_requests.append({
             "contents": [{
@@ -821,6 +827,7 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
 
         task_metadata.append({
             "slide_num": item['slide_num'],
+            "variation": variation,
             "prompt": prompt_text,
             "output_filename": filename,
             "original_image": item.get('original_image', '')
@@ -1048,6 +1055,12 @@ def main():
         action='store_true',
         help='Download and generate prompts only, do not create images'
     )
+    parser.add_argument(
+        '--variations',
+        type=int,
+        default=1,
+        help='Number of variations to generate per slide (default: 1)'
+    )
 
     args = parser.parse_args()
 
@@ -1166,11 +1179,17 @@ def main():
 
         prompt = image_to_prompt(str(image_path), slide_num)
 
-        prompts_data.append({
-            'slide_num': slide_num,
-            'prompt': prompt,
-            'original_image': image_path.name
-        })
+        # Create multiple variations if requested
+        for var_num in range(1, args.variations + 1):
+            prompts_data.append({
+                'slide_num': slide_num,
+                'variation': var_num,
+                'prompt': prompt,
+                'original_image': image_path.name
+            })
+
+        if args.variations > 1:
+            print(f"    Created {args.variations} variations for slide {slide_num}")
 
     if not prompts_data:
         print("ERROR: No prompts generated!")
