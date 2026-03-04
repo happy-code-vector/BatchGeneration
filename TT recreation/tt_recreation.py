@@ -15,11 +15,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from PIL import Image
 import subprocess
-import json
 import re
 import requests
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables
 load_dotenv()
@@ -94,7 +92,7 @@ def download_tiktok_slides(url: str, output_dir: str) -> list:
 def download_tiktok_photo_mode(url: str, output_dir: str) -> list:
     """
     Download images from TikTok Photo Mode (slideshow)
-    Uses multiple methods to extract images
+    Uses Selenium browser automation
     """
     print("Fetching TikTok photo mode...")
 
@@ -109,117 +107,9 @@ def download_tiktok_photo_mode(url: str, output_dir: str) -> list:
     post_id = match.group(2)
     print(f"Username: @{username}, Post ID: {post_id}")
 
-    # Method 1: Try TikTok internal API
-    try:
-        print("\nTrying TikTok API method...")
-        images = download_via_tiktok_api(url, username, post_id, output_dir)
-        if images:
-            return images
-    except Exception as e:
-        print(f"API method failed: {e}")
-
-    # Method 2: Try Selenium with shorter timeout
-    try:
-        print("\nTrying browser automation method...")
-        images = download_with_selenium(url, output_dir)
-        if images:
-            return images
-    except Exception as e:
-        print(f"Selenium method failed: {e}")
-
-    # Method 3: Fallback to HTTP with different patterns
-    print("\nTrying HTTP extraction method...")
-    return download_with_http(url, output_dir)
-
-
-def download_via_tiktok_api(original_url: str, username: str, post_id: str, output_dir: str) -> list:
-    """Use TikTok's internal API to fetch post data"""
-
-    # TikTok's internal API endpoint for post info
-    api_url = f"https://www.tiktok.com/api/post/item_list/?aid=1988&count=1&secUid=&id={post_id}"
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': f'https://www.tiktok.com/@{username}/photo/{post_id}',
-        'Accept': 'application/json',
-    }
-
-    response = requests.get(api_url, headers=headers, timeout=30)
-    print(f"API Response status: {response.status_code}")
-
-    if response.status_code == 200:
-        try:
-            data = response.json()
-            # Save debug JSON
-            debug_file = os.path.join(output_dir, "_debug_api_response.json")
-            with open(debug_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            print(f"Saved API response to: {debug_file}")
-
-            # Extract image URLs from API response
-            image_urls = []
-
-            if 'itemList' in data:
-                for item in data['itemList']:
-                    if 'imagePost' in item:
-                        images = item['imagePost'].get('images', [])
-                        for img in images:
-                            if 'imageURL' in img:
-                                image_urls.append(img['imageURL'])
-                            elif 'urlList' in img:
-                                image_urls.extend(img['urlList'])
-
-            if image_urls:
-                print(f"Found {len(image_urls)} images via API")
-                return download_images_from_urls(image_urls, output_dir)
-
-        except json.JSONDecodeError:
-            print("Could not parse API response as JSON")
-
-    # Try alternative API endpoint
-    alt_api_url = f"https://www.tiktok.com/api/comment/list/?aweme_id={post_id}"
-
-    # Try fetching the page and looking for embedded JSON data
-    response = requests.get(original_url, headers=headers, timeout=30)
-    if response.status_code == 200:
-        # Look for image URLs in the response
-        html = response.text
-
-        # Try to find JSON data embedded in the page
-        json_patterns = [
-            r'"imagePost"\s*:\s*\{[^}]*"images"\s*:\s*\[([^\]]+)\]',
-            r'"imageURL"\s*:\s*"([^"]+)"',
-            r'"urlList"\s*:\s*\[([^\]]+)\]',
-        ]
-
-        image_urls = []
-        for pattern in json_patterns:
-            matches = re.findall(pattern, html)
-            for match in matches:
-                # Extract URLs from the match
-                url_matches = re.findall(r'https://[^"\',\s]+', match)
-                image_urls.extend(url_matches)
-
-        # Also try regex extraction
-        image_urls.extend(extract_images_regex(html))
-
-        if image_urls:
-            # Filter to only TikTok CDN URLs
-            tiktok_urls = [u for u in image_urls if 'tiktok' in u or 'tos-' in u]
-
-            # Remove duplicates
-            seen = set()
-            unique_urls = []
-            for u in tiktok_urls:
-                if u not in seen and 'avatar' not in u and 'music' not in u:
-                    seen.add(u)
-                    unique_urls.append(u)
-
-            if unique_urls:
-                print(f"Found {len(unique_urls)} images via page extraction")
-                return download_images_from_urls(unique_urls, output_dir)
-
-    return []
+    # Use Selenium for browser automation
+    print("\nUsing browser automation...")
+    return download_with_selenium(url, output_dir)
 
 
 def download_with_selenium(url: str, output_dir: str) -> list:
@@ -360,118 +250,6 @@ def download_with_selenium(url: str, output_dir: str) -> list:
     finally:
         driver.quit()
         print("Browser closed.")
-
-
-def download_with_http(url: str, output_dir: str) -> list:
-    """Fallback HTTP request method"""
-    print("Fetching via HTTP...")
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://www.tiktok.com/',
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        print(f"Response status: {response.status_code}")
-
-        if response.status_code != 200:
-            print(f"Failed to fetch page: {response.status_code}")
-            return []
-
-        html_content = response.text
-
-        # Debug: Save HTML
-        debug_file = os.path.join(output_dir, "_debug_http_html.txt")
-        with open(debug_file, 'w', encoding='utf-8') as f:
-            f.write(html_content[:50000])
-
-        # Extract images
-        image_urls = extract_images_from_html(html_content)
-        image_urls.extend(extract_images_regex(html_content))
-
-        # Remove duplicates
-        seen = set()
-        unique_urls = []
-        for u in image_urls:
-            if u not in seen and 'avatar' not in u and 'music' not in u:
-                seen.add(u)
-                unique_urls.append(u)
-
-        if unique_urls:
-            print(f"Found {len(unique_urls)} image URLs")
-            return download_images_from_urls(unique_urls, output_dir)
-
-        print("Could not extract images from page")
-        return []
-
-    except Exception as e:
-        print(f"Error fetching page: {e}")
-        return []
-
-
-def extract_images_from_html(html: str) -> list:
-    """Extract image URLs from TikTok HTML page"""
-    image_urls = []
-
-    # Look for SIGI_STATE JSON
-    sigi_match = re.search(r'<script id="SIGI_STATE" type="application/json">(.+?)</script>', html)
-    if sigi_match:
-        try:
-            data = json.loads(sigi_match.group(1))
-            # Navigate to find image URLs
-            if 'ItemModule' in data:
-                for item_id, item in data['ItemModule'].items():
-                    if 'imagePost' in item:
-                        images = item['imagePost'].get('images', [])
-                        for img in images:
-                            if 'imageURL' in img:
-                                image_urls.append(img['imageURL'])
-                            elif 'urlList' in img:
-                                image_urls.extend(img['urlList'])
-        except json.JSONDecodeError:
-            pass
-
-    # Look for __NEXT_DATA__ JSON
-    next_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', html)
-    if next_match:
-        try:
-            data = json.loads(next_match.group(1))
-            # Navigate through props -> pageProps -> itemInfo -> itemStruct
-            props = data.get('props', {})
-            page_props = props.get('pageProps', {})
-            item_info = page_props.get('itemInfo', {})
-            item_struct = item_info.get('itemStruct', {})
-
-            # Check for imagePost
-            image_post = item_struct.get('imagePost', {})
-            if image_post:
-                images = image_post.get('images', [])
-                for img in images:
-                    # Get the highest quality URL
-                    if 'urlList' in img:
-                        # Usually last URL is highest quality
-                        url_list = img['urlList']
-                        if url_list:
-                            image_urls.append(url_list[-1])
-                    elif 'imageURL' in img:
-                        image_urls.append(img['imageURL'])
-
-            # Check for video slides
-            video = item_struct.get('video', {})
-            if video:
-                # Check for playAddr which might have multiple images
-                play_addr = video.get('playAddr', [])
-                if isinstance(play_addr, list):
-                    for addr in play_addr:
-                        if 'src' in addr:
-                            image_urls.append(addr['src'])
-        except json.JSONDecodeError:
-            pass
-
-    return image_urls
 
 
 def extract_images_regex(html: str) -> list:
@@ -1302,12 +1080,6 @@ def main():
         default=1,
         help='Number of variations to generate per slide (default: 1)'
     )
-    parser.add_argument(
-        '--workers',
-        type=int,
-        default=3,
-        help='Number of parallel workers for processing multiple URLs (default: 3)'
-    )
 
     args = parser.parse_args()
 
@@ -1341,7 +1113,7 @@ def main():
     # Create timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Handle URL file (multiple URLs)
+    # Handle URL file (multiple URLs) - sequential processing to avoid detection
     if args.url_file:
         urls = parse_urls_from_file(args.url_file)
         if not urls:
@@ -1349,20 +1121,23 @@ def main():
             sys.exit(1)
 
         print(f"\n{'='*60}")
-        print(f"BATCH URL PROCESSING")
+        print(f"BATCH URL PROCESSING (Sequential)")
         print(f"{'='*60}")
         print(f"Found {len(urls)} TikTok URLs to process")
-        print(f"Workers: {args.workers} (parallel processing)")
         for i, url in enumerate(urls, 1):
             print(f"  {i}. {url}")
         print(f"{'='*60}\n")
 
-        # Process URLs in parallel using ThreadPoolExecutor
-        all_results = [None] * len(urls)  # Pre-allocate to preserve order
+        # Process URLs sequentially to avoid detection
+        all_results = []
         total_start_time = time.time()
 
-        def process_url_task(idx, url):
-            """Wrapper for parallel processing"""
+        for idx, url in enumerate(urls, 1):
+            print(f"\n{'#'*60}")
+            print(f"# PROCESSING URL {idx}/{len(urls)}")
+            print(f"# URL: {url}")
+            print(f"{'#'*60}\n")
+
             result = process_source(
                 url=url,
                 input_dir='',
@@ -1377,33 +1152,13 @@ def main():
                 url_index=idx,
                 total_urls=len(urls)
             )
-            return idx, result
+            all_results.append(result)
 
-        # Determine number of workers (don't exceed number of URLs)
-        num_workers = min(args.workers, len(urls))
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            # Submit all tasks
-            future_to_url = {
-                executor.submit(process_url_task, idx, url): (idx, url)
-                for idx, url in enumerate(urls, 1)
-            }
-
-            # Collect results as they complete
-            for future in as_completed(future_to_url):
-                idx, url = future_to_url[future]
-                try:
-                    result_idx, result = future.result()
-                    all_results[result_idx - 1] = result
-                    print(f"\n[Worker] Completed URL {result_idx}/{len(urls)}")
-                except Exception as e:
-                    print(f"\n[Worker] ERROR processing URL {idx}: {e}")
-                    all_results[idx - 1] = {
-                        'success': 0,
-                        'errors': 1,
-                        'total': 0,
-                        'error': str(e)
-                    }
+            # Add delay between URLs to avoid detection
+            if idx < len(urls):
+                delay = 5  # 5 second delay between URLs
+                print(f"\nWaiting {delay} seconds before next URL...")
+                time.sleep(delay)
 
         # Print final summary
         total_elapsed = time.time() - total_start_time
@@ -1415,7 +1170,6 @@ def main():
         print(f"# ALL URLs PROCESSED!")
         print(f"{'#'*60}")
         print(f"Total URLs: {len(urls)}")
-        print(f"Parallel workers: {num_workers}")
         print(f"Total images: {total_images}")
         print(f"Total generated: {total_success}")
         print(f"Total errors: {total_errors}")
