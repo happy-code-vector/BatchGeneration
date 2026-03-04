@@ -1,8 +1,10 @@
 # Downloaded TikTok slides
 downloaded_slides_*/
+downloaded_slides_*_*/
 
 # Generated images
 generated_images_*/
+generated_images_*_*/
 
 # Debug files
 _debug_*.txt

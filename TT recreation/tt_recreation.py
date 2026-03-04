@@ -1014,6 +1014,231 @@ def save_results(output_dir: str, all_results: list, total_prompts: int, url: st
     print(f"\nResults saved to: {results_file}")
 
 
+def parse_urls_from_file(filepath: str) -> list:
+    """
+    Parse URLs from a file. Handles:
+    - Line by line (one URL per line)
+    - Comma separated
+    - Tab separated
+    - Space separated
+
+    Returns list of URLs.
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"ERROR: URL file not found: {filepath}")
+        return []
+    except Exception as e:
+        print(f"ERROR: Could not read URL file: {e}")
+        return []
+
+    # Replace tabs and newlines with spaces, then split by common delimiters
+    content = content.replace('\t', ' ').replace('\n', ' ').replace(',', ' ')
+
+    # Split by space and filter empty strings
+    urls = [url.strip() for url in content.split(' ') if url.strip()]
+
+    # Filter to only valid TikTok URLs
+    tiktok_urls = []
+    for url in urls:
+        # Accept tiktok.com URLs
+        if 'tiktok.com' in url:
+            tiktok_urls.append(url)
+        else:
+            print(f"Warning: Skipping invalid URL: {url}")
+
+    return tiktok_urls
+
+
+def process_source(url: str, input_dir: str, skip_list: list, bulk: int,
+                   output_base: str, keep: bool, variations: int,
+                   list_only: bool, dry_run: bool, timestamp: str,
+                   url_index: int = 0, total_urls: int = 1) -> dict:
+    """
+    Process a single source (URL or input directory).
+
+    Returns dict with processing results.
+    """
+    source_label = f"URL {url_index}/{total_urls}" if total_urls > 1 else "Source"
+
+    if url_index > 0 and total_urls > 1:
+        print(f"\n{'#'*60}")
+        print(f"# PROCESSING {source_label}")
+        print(f"# URL: {url}")
+        print(f"{'#'*60}\n")
+
+    # Determine output directories
+    if output_base:
+        base_dir = Path(output_base)
+    else:
+        base_dir = Path('.')
+
+    # Create unique subdirectory for this URL
+    if url:
+        url_slug = url.split('/')[-1] if '/' in url else f"url_{url_index}"
+        downloads_dir = base_dir / f"downloaded_slides_{timestamp}_{url_slug}"
+        generated_dir = base_dir / f"generated_images_{timestamp}_{url_slug}"
+    else:
+        # Using input-dir
+        downloads_dir = Path(input_dir)
+        if output_base:
+            generated_dir = base_dir / f"generated_images_{timestamp}"
+        else:
+            generated_dir = Path(input_dir).parent / f"generated_images_{timestamp}"
+
+    # Get slide images
+    if input_dir:
+        print(f"\n{'='*60}")
+        print("Loading Images from Local Folder")
+        print(f"Folder: {input_dir}")
+        print(f"{'='*60}\n")
+
+        input_path = Path(input_dir)
+        if not input_path.exists():
+            print(f"ERROR: Input directory not found: {input_dir}")
+            return {'success': 0, 'errors': 0, 'total': 0, 'error': 'Input directory not found'}
+
+        # Find all image files
+        downloaded_files = []
+        for ext in ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif']:
+            downloaded_files.extend(input_path.glob(ext))
+
+        downloaded_files.sort(key=lambda x: x.name)
+
+        if not downloaded_files:
+            print(f"ERROR: No image files found in: {input_dir}")
+            return {'success': 0, 'errors': 0, 'total': 0, 'error': 'No image files found'}
+
+        print(f"Found {len(downloaded_files)} images:")
+        for i, f in enumerate(downloaded_files, 1):
+            print(f"  Slide {i}: {f.name}")
+
+    else:
+        # Download from TikTok URL
+        generated_dir.mkdir(exist_ok=True)
+        downloads_dir.mkdir(exist_ok=True)
+
+        downloaded_files = download_tiktok_slides(url, str(downloads_dir))
+
+        if not downloaded_files:
+            print("ERROR: No slides downloaded!")
+            return {'success': 0, 'errors': 0, 'total': 0, 'error': 'No slides downloaded'}
+
+    # List mode - just show slides and exit
+    if list_only:
+        print(f"\n{'='*60}")
+        print("SLIDE LIST")
+        print(f"{'='*60}")
+        for i, f in enumerate(downloaded_files, 1):
+            skip_marker = " [SKIP]" if i in skip_list else ""
+            print(f"  Slide {i}: {f.name}{skip_marker}")
+        print(f"\nTotal slides: {len(downloaded_files)}")
+        print(f"Slides to generate: {len(downloaded_files) - len([s for s in skip_list if s <= len(downloaded_files)])}")
+        return {'success': 0, 'errors': 0, 'total': len(downloaded_files)}
+
+    # Generate prompts from images (Vision API)
+    print(f"\n{'='*60}")
+    print("Generating Prompts from Images (Gemini Vision)")
+    print(f"{'='*60}\n")
+
+    prompts_data = []
+    for i, image_path in enumerate(downloaded_files, 1):
+        slide_num = i
+
+        # Skip if in skip list
+        if slide_num in skip_list:
+            print(f"  Skipping slide {slide_num}")
+            continue
+
+        prompt = image_to_prompt(str(image_path), slide_num)
+
+        # Create multiple variations if requested
+        for var_num in range(1, variations + 1):
+            prompts_data.append({
+                'slide_num': slide_num,
+                'variation': var_num,
+                'prompt': prompt,
+                'original_image': image_path.name
+            })
+
+        if variations > 1:
+            print(f"    Created {variations} variations for slide {slide_num}")
+
+    if not prompts_data:
+        print("ERROR: No prompts generated!")
+        return {'success': 0, 'errors': 0, 'total': 0, 'error': 'No prompts generated'}
+
+    print(f"\nGenerated {len(prompts_data)} prompts")
+
+    # Dry run mode - stop here
+    if dry_run:
+        print("\n[DRY RUN] Prompts generated. Skipping image creation.")
+        for item in prompts_data:
+            print(f"\n--- Slide {item['slide_num']} ---")
+            print(item['prompt'][:500] + "..." if len(item['prompt']) > 500 else item['prompt'])
+        return {'success': 0, 'errors': 0, 'total': len(prompts_data)}
+
+    # Batch image generation
+    batches = get_batches(prompts_data, bulk)
+    total_batches = len(batches)
+
+    print(f"\n{'='*60}")
+    print(f"Starting Batch Image Generation")
+    print(f"Total images: {len(prompts_data)}")
+    print(f"Batch size: {bulk}")
+    print(f"Total batches: {total_batches}")
+    print(f"{'='*60}\n")
+
+    # Process batches
+    start_time = time.time()
+    all_results = []
+
+    for batch_idx, batch in enumerate(batches):
+        batch_num = batch_idx + 1
+        result = process_batch(batch, str(generated_dir), batch_num, total_batches, variations)
+        all_results.append(result)
+
+    # Save results
+    save_results(str(generated_dir), all_results, len(prompts_data), url, skip_list)
+
+    elapsed_time = time.time() - start_time
+    total_success = sum(r['success'] for r in all_results)
+    total_errors = sum(r['errors'] for r in all_results)
+
+    print(f"\n{'='*60}")
+    print(f"RECREATION COMPLETE!")
+    print(f"{'='*60}")
+    print(f"Source URL: {url}")
+    print(f"Total images: {len(prompts_data)}")
+    print(f"Generated: {total_success}")
+    print(f"Errors: {total_errors}")
+    print(f"Time elapsed: {elapsed_time:.1f} seconds")
+    print(f"Output directory: {generated_dir}")
+    print(f"\nCost savings: 50% discount applied via Gemini batch mode!")
+
+    # Clean up downloads if not keeping
+    if not keep and url:  # Only clean up if we downloaded from URL
+        print(f"\nCleaning up downloaded slides...")
+        try:
+            shutil.rmtree(str(downloads_dir))
+            print(f"Removed: {downloads_dir}")
+        except Exception as e:
+            print(f"Warning: Could not remove downloads folder: {e}")
+    else:
+        if url:
+            print(f"\nDownloaded slides kept at: {downloads_dir}")
+
+    return {
+        'success': total_success,
+        'errors': total_errors,
+        'total': len(prompts_data),
+        'output_dir': str(generated_dir),
+        'time': elapsed_time
+    }
+
+
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
@@ -1024,6 +1249,12 @@ def main():
         type=str,
         default='',
         help='TikTok slideshow URL'
+    )
+    parser.add_argument(
+        '--url-file',
+        type=str,
+        default='',
+        help='File containing TikTok URLs (line by line, comma, tab, or space separated)'
     )
     parser.add_argument(
         '--input-dir',
@@ -1073,19 +1304,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate that either --url or --input-dir is provided
-    if not args.url and not args.input_dir:
-        print("ERROR: Either --url or --input-dir must be provided!")
+    # Validate that at least one source is provided
+    if not args.url and not args.url_file and not args.input_dir:
+        print("ERROR: Either --url, --url-file, or --input-dir must be provided!")
         print("\nUsage examples:")
-        print("  From TikTok URL (may require manual download due to anti-bot measures):")
+        print("  Single TikTok URL:")
         print("    python tt_recreation.py --url 'https://www.tiktok.com/@user/photo/123456'")
-        print("\n  From pre-downloaded images (recommended):")
+        print("\n  Multiple URLs from file:")
+        print("    python tt_recreation.py --url-file urls.txt")
+        print("\n  From pre-downloaded images:")
         print("    python tt_recreation.py --input-dir './my_downloaded_slides'")
-        print("\nTo download TikTok slides manually:")
-        print("  1. Open the TikTok slideshow in your browser")
-        print("  2. Right-click each image and 'Save Image As...'")
-        print("  3. Save all images to a folder")
-        print("  4. Use --input-dir to point to that folder")
+        print("\nURL file format (any of these work):")
+        print("  - One URL per line")
+        print("  - Comma separated: url1,url2,url3")
+        print("  - Tab or space separated")
         sys.exit(1)
 
     # Validate batch size
@@ -1102,166 +1334,73 @@ def main():
     # Create timestamp
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Determine source (URL or local folder)
-    source_url = args.url if args.url else f"Local folder: {args.input_dir}"
+    # Handle URL file (multiple URLs)
+    if args.url_file:
+        urls = parse_urls_from_file(args.url_file)
+        if not urls:
+            print("ERROR: No valid TikTok URLs found in file!")
+            sys.exit(1)
 
-    # Get slide images
-    if args.input_dir:
-        # Use local folder of pre-downloaded images
         print(f"\n{'='*60}")
-        print("Loading Images from Local Folder")
-        print(f"Folder: {args.input_dir}")
+        print(f"BATCH URL PROCESSING")
+        print(f"{'='*60}")
+        print(f"Found {len(urls)} TikTok URLs to process")
+        for i, url in enumerate(urls, 1):
+            print(f"  {i}. {url}")
         print(f"{'='*60}\n")
 
-        input_path = Path(args.input_dir)
-        if not input_path.exists():
-            print(f"ERROR: Input directory not found: {args.input_dir}")
-            sys.exit(1)
+        # Process each URL
+        all_results = []
+        total_start_time = time.time()
 
-        # Find all image files
-        downloaded_files = []
-        for ext in ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif']:
-            downloaded_files.extend(input_path.glob(ext))
+        for idx, url in enumerate(urls, 1):
+            result = process_source(
+                url=url,
+                input_dir='',
+                skip_list=skip_list,
+                bulk=args.bulk,
+                output_base=args.output,
+                keep=args.keep,
+                variations=args.variations,
+                list_only=args.list,
+                dry_run=args.dry_run,
+                timestamp=timestamp,
+                url_index=idx,
+                total_urls=len(urls)
+            )
+            all_results.append(result)
 
-        downloaded_files.sort(key=lambda x: x.name)
+        # Print final summary
+        total_elapsed = time.time() - total_start_time
+        total_success = sum(r['success'] for r in all_results)
+        total_errors = sum(r['errors'] for r in all_results)
+        total_images = sum(r['total'] for r in all_results)
 
-        if not downloaded_files:
-            print(f"ERROR: No image files found in: {args.input_dir}")
-            sys.exit(1)
+        print(f"\n{'#'*60}")
+        print(f"# ALL URLs PROCESSED!")
+        print(f"{'#'*60}")
+        print(f"Total URLs: {len(urls)}")
+        print(f"Total images: {total_images}")
+        print(f"Total generated: {total_success}")
+        print(f"Total errors: {total_errors}")
+        print(f"Total time: {total_elapsed:.1f} seconds")
+        print(f"{'#'*60}")
 
-        print(f"Found {len(downloaded_files)} images:")
-        for i, f in enumerate(downloaded_files, 1):
-            print(f"  Slide {i}: {f.name}")
-
-        # For local folder, output to same location with generated_ prefix
-        downloads_dir = input_path
-        if args.output:
-            generated_dir = Path(args.output) / f"generated_images_{timestamp}"
-        else:
-            generated_dir = Path(args.input_dir).parent / f"generated_images_{timestamp}"
-        generated_dir.mkdir(exist_ok=True)
-
-    else:
-        # Download from TikTok URL
-        if args.output:
-            downloads_dir = Path(args.output) / f"downloaded_slides_{timestamp}"
-            generated_dir = Path(args.output) / f"generated_images_{timestamp}"
-        else:
-            downloads_dir, generated_dir = create_output_dirs(timestamp, args.keep)
-
-        downloaded_files = download_tiktok_slides(args.url, str(downloads_dir))
-
-        if not downloaded_files:
-            print("ERROR: No slides downloaded!")
-            print("\nTIP: TikTok has strong anti-bot protections.")
-            print("Use --input-dir to provide pre-downloaded images instead:")
-            print("  1. Open the TikTok slideshow in your browser")
-            print("  2. Right-click each image and 'Save Image As...'")
-            print("  3. Run: python tt_recreation.py --input-dir ./your_folder")
-            sys.exit(1)
-
-    # List mode - just show slides and exit
-    if args.list:
-        print(f"\n{'='*60}")
-        print("SLIDE LIST")
-        print(f"{'='*60}")
-        for i, f in enumerate(downloaded_files, 1):
-            skip_marker = " [SKIP]" if i in skip_list else ""
-            print(f"  Slide {i}: {f.name}{skip_marker}")
-        print(f"\nTotal slides: {len(downloaded_files)}")
-        print(f"Slides to generate: {len(downloaded_files) - len([s for s in skip_list if s <= len(downloaded_files)])}")
         return
 
-    # Step 2: Generate prompts from images (Vision API)
-    print(f"\n{'='*60}")
-    print("Generating Prompts from Images (Gemini Vision)")
-    print(f"{'='*60}\n")
-
-    prompts_data = []
-    for i, image_path in enumerate(downloaded_files, 1):
-        slide_num = i
-
-        # Skip if in skip list
-        if slide_num in skip_list:
-            print(f"  Skipping slide {slide_num}")
-            continue
-
-        prompt = image_to_prompt(str(image_path), slide_num)
-
-        # Create multiple variations if requested
-        for var_num in range(1, args.variations + 1):
-            prompts_data.append({
-                'slide_num': slide_num,
-                'variation': var_num,
-                'prompt': prompt,
-                'original_image': image_path.name
-            })
-
-        if args.variations > 1:
-            print(f"    Created {args.variations} variations for slide {slide_num}")
-
-    if not prompts_data:
-        print("ERROR: No prompts generated!")
-        sys.exit(1)
-
-    print(f"\nGenerated {len(prompts_data)} prompts")
-
-    # Dry run mode - stop here
-    if args.dry_run:
-        print("\n[DRY RUN] Prompts generated. Skipping image creation.")
-        for item in prompts_data:
-            print(f"\n--- Slide {item['slide_num']} ---")
-            print(item['prompt'][:500] + "..." if len(item['prompt']) > 500 else item['prompt'])
-        return
-
-    # Step 3: Batch image generation
-    batches = get_batches(prompts_data, args.bulk)
-    total_batches = len(batches)
-
-    print(f"\n{'='*60}")
-    print(f"Starting Batch Image Generation")
-    print(f"Total images: {len(prompts_data)}")
-    print(f"Batch size: {args.bulk}")
-    print(f"Total batches: {total_batches}")
-    print(f"{'='*60}\n")
-
-    # Process batches
-    start_time = time.time()
-    all_results = []
-
-    for batch_idx, batch in enumerate(batches):
-        batch_num = batch_idx + 1
-        result = process_batch(batch, str(generated_dir), batch_num, total_batches, args.variations)
-        all_results.append(result)
-
-    # Save results
-    save_results(str(generated_dir), all_results, len(prompts_data), args.url, skip_list)
-
-    elapsed_time = time.time() - start_time
-    total_success = sum(r['success'] for r in all_results)
-    total_errors = sum(r['errors'] for r in all_results)
-
-    print(f"\n{'='*60}")
-    print(f"RECREATION COMPLETE!")
-    print(f"{'='*60}")
-    print(f"Source URL: {args.url}")
-    print(f"Total images: {len(prompts_data)}")
-    print(f"Generated: {total_success}")
-    print(f"Errors: {total_errors}")
-    print(f"Time elapsed: {elapsed_time:.1f} seconds")
-    print(f"Output directory: {generated_dir}")
-    print(f"\nCost savings: 50% discount applied via Gemini batch mode!")
-
-    # Clean up downloads if not keeping
-    if not args.keep:
-        print(f"\nCleaning up downloaded slides...")
-        try:
-            shutil.rmtree(str(downloads_dir))
-            print(f"Removed: {downloads_dir}")
-        except Exception as e:
-            print(f"Warning: Could not remove downloads folder: {e}")
-    else:
-        print(f"\nDownloaded slides kept at: {downloads_dir}")
+    # Single URL or input-dir processing
+    result = process_source(
+        url=args.url,
+        input_dir=args.input_dir,
+        skip_list=skip_list,
+        bulk=args.bulk,
+        output_base=args.output,
+        keep=args.keep,
+        variations=args.variations,
+        list_only=args.list,
+        dry_run=args.dry_run,
+        timestamp=timestamp
+    )
 
 
 if __name__ == "__main__":
