@@ -19,6 +19,7 @@ import json
 import re
 import requests
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables
 load_dotenv()
@@ -1301,6 +1302,12 @@ def main():
         default=1,
         help='Number of variations to generate per slide (default: 1)'
     )
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=3,
+        help='Number of parallel workers for processing multiple URLs (default: 3)'
+    )
 
     args = parser.parse_args()
 
@@ -1345,15 +1352,17 @@ def main():
         print(f"BATCH URL PROCESSING")
         print(f"{'='*60}")
         print(f"Found {len(urls)} TikTok URLs to process")
+        print(f"Workers: {args.workers} (parallel processing)")
         for i, url in enumerate(urls, 1):
             print(f"  {i}. {url}")
         print(f"{'='*60}\n")
 
-        # Process each URL
-        all_results = []
+        # Process URLs in parallel using ThreadPoolExecutor
+        all_results = [None] * len(urls)  # Pre-allocate to preserve order
         total_start_time = time.time()
 
-        for idx, url in enumerate(urls, 1):
+        def process_url_task(idx, url):
+            """Wrapper for parallel processing"""
             result = process_source(
                 url=url,
                 input_dir='',
@@ -1368,18 +1377,45 @@ def main():
                 url_index=idx,
                 total_urls=len(urls)
             )
-            all_results.append(result)
+            return idx, result
+
+        # Determine number of workers (don't exceed number of URLs)
+        num_workers = min(args.workers, len(urls))
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_url = {
+                executor.submit(process_url_task, idx, url): (idx, url)
+                for idx, url in enumerate(urls, 1)
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_url):
+                idx, url = future_to_url[future]
+                try:
+                    result_idx, result = future.result()
+                    all_results[result_idx - 1] = result
+                    print(f"\n[Worker] Completed URL {result_idx}/{len(urls)}")
+                except Exception as e:
+                    print(f"\n[Worker] ERROR processing URL {idx}: {e}")
+                    all_results[idx - 1] = {
+                        'success': 0,
+                        'errors': 1,
+                        'total': 0,
+                        'error': str(e)
+                    }
 
         # Print final summary
         total_elapsed = time.time() - total_start_time
-        total_success = sum(r['success'] for r in all_results)
-        total_errors = sum(r['errors'] for r in all_results)
-        total_images = sum(r['total'] for r in all_results)
+        total_success = sum(r['success'] for r in all_results if r)
+        total_errors = sum(r['errors'] for r in all_results if r)
+        total_images = sum(r['total'] for r in all_results if r)
 
         print(f"\n{'#'*60}")
         print(f"# ALL URLs PROCESSED!")
         print(f"{'#'*60}")
         print(f"Total URLs: {len(urls)}")
+        print(f"Parallel workers: {num_workers}")
         print(f"Total images: {total_images}")
         print(f"Total generated: {total_success}")
         print(f"Total errors: {total_errors}")
