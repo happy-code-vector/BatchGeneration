@@ -1,490 +1,372 @@
 """
-Scene-based Batch Image Generation
-Generates images from CSV files with Scene, Shot_Type, Shot_Title, and Full_Prompt fields
-Uses Google Gemini Batch API (50% discount)
+Batch Image Generation using Gemini Batch API (50% discount)
+Reads from XLSX file with paired Clean/Glyphosate prompts
+Outputs organized by category subdirectories
 """
 
-import csv
 import os
 import sys
+import re
 import time
 import datetime
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
-import re
 
-# Load environment variables
+import openpyxl
+
 load_dotenv()
 
-# Configuration
-BATCH_SIZE = 50  # Gemini batch API limit
-OUTPUT_DIR_TEMPLATE = "generated_images_{timestamp}_{project}"
+BATCH_SIZE = 50
 
-# Check for API key
 if not os.environ.get("GEMINI_API_KEY"):
     print("ERROR: GEMINI_API_KEY environment variable not set!")
     print("Please set it in .env file: GEMINI_API_KEY=your_api_key_here")
     sys.exit(1)
 
-# Initialize Gemini client
 from google import genai
+
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 
-def create_output_dir(project_name: str) -> str:
-    """Create timestamped output directory"""
+def sanitize_filename(name: str) -> str:
+    safe = re.sub(r'[<>:"/\\|?*]', '', name)
+    safe = re.sub(r'[\s_]+', '-', safe)
+    safe = re.sub(r'-+', '-', safe)
+    safe = safe.strip('-')
+    return safe.lower()
+
+
+def read_xlsx_prompts(xlsx_file: str) -> list:
+    wb = openpyxl.load_workbook(xlsx_file, read_only=True)
+    ws = wb["Pairs (Side by Side)"]
+
+    prompts = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        row_id, category, food_item, clean_prompt, glyphosate_prompt, *_ = row
+        if not row_id or not food_item:
+            continue
+
+        category = str(category).strip()
+        food_item = str(food_item).strip()
+        safe_food = sanitize_filename(food_item)
+        safe_category = sanitize_filename(category)
+
+        # Quality suffix appended to every prompt
+        quality_suffix = (
+            "\n\nImage specifications: 9:16 aspect ratio (vertical/portrait orientation), "
+            "2K resolution (1440x2560), highest quality, photorealistic, sharp details."
+        )
+
+        if clean_prompt and str(clean_prompt).strip():
+            clean_text = str(clean_prompt).strip() + quality_suffix
+            prompts.append({
+                "id": int(row_id),
+                "category": category,
+                "safe_category": safe_category,
+                "food_item": food_item,
+                "safe_food": safe_food,
+                "prompt": clean_text,
+                "label": "clean",
+                "output_filename": f"{row_id}-{safe_food}-clean.png",
+            })
+
+        if glyphosate_prompt and str(glyphosate_prompt).strip():
+            glyph_text = str(glyphosate_prompt).strip() + quality_suffix
+            prompts.append({
+                "id": int(row_id),
+                "category": category,
+                "safe_category": safe_category,
+                "food_item": food_item,
+                "safe_food": safe_food,
+                "prompt": glyph_text,
+                "label": "glyphosate",
+                "output_filename": f"{row_id}-{safe_food}-glyphosate.png",
+            })
+
+    wb.close()
+    return prompts
+
+
+def create_output_dir() -> str:
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_project = re.sub(r'[^\w\-]', '_', project_name)[:30]
-    output_dir = OUTPUT_DIR_TEMPLATE.format(timestamp=timestamp, project=safe_project)
+    output_dir = f"generated_images_{timestamp}"
     Path(output_dir).mkdir(exist_ok=True)
     return output_dir
 
 
-def sanitize_filename(name: str) -> str:
-    """Create safe filename from string"""
-    # Remove or replace unsafe characters
-    safe = re.sub(r'[<>:"/\\|?*]', '', name)
-    # Replace multiple spaces/hyphens with single hyphen
-    safe = re.sub(r'[\s_]+', '-', safe)
-    safe = re.sub(r'-+', '-', safe)
-    # Remove leading/trailing hyphens
-    safe = safe.strip('-')
-    return safe
-
-
-def read_csv_prompts(csv_file: str) -> list:
-    """Read CSV with Scene, Shot_Type, Shot_Title, Full_Prompt fields"""
-    prompts = []
-
-    try:
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        print(f"Total rows in CSV: {len(rows)}")
-
-        for i, row in enumerate(rows, start=1):
-            scene = row.get('Scene', '').strip()
-            shot_type = row.get('Shot_Type', '').strip()
-            shot_title = row.get('Shot_Title', '').strip()
-            full_prompt = row.get('Full_Prompt (Copy & Paste Ready)', '').strip()
-
-            if not full_prompt:
-                full_prompt = row.get('Full_Prompt', '').strip()
-
-            if scene and shot_type and shot_title and full_prompt:
-                # Extract first letter of shot type
-                shot_type_letter = shot_type[0].upper() if shot_type else 'U'
-
-                # Create filename: scene - shot_type_letter - shot_title
-                safe_title = sanitize_filename(shot_title)
-                filename = f"{scene} - {shot_type_letter} - {safe_title}.png"
-
-                prompts.append({
-                    'row_index': i,
-                    'scene': scene,
-                    'shot_type': shot_type,
-                    'shot_type_letter': shot_type_letter,
-                    'shot_title': shot_title,
-                    'full_prompt': full_prompt,
-                    'output_filename': filename
-                })
-
-    except UnicodeDecodeError:
-        print("UTF-8 failed, trying with latin-1 encoding...")
-        with open(csv_file, 'r', encoding='latin-1') as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        for i, row in enumerate(rows, start=1):
-            scene = row.get('Scene', '').strip()
-            shot_type = row.get('Shot_Type', '').strip()
-            shot_title = row.get('Shot_Title', '').strip()
-            full_prompt = row.get('Full_Prompt (Copy & Paste Ready)', '').strip()
-
-            if not full_prompt:
-                full_prompt = row.get('Full_Prompt', '').strip()
-
-            if scene and shot_type and shot_title and full_prompt:
-                shot_type_letter = shot_type[0].upper() if shot_type else 'U'
-                safe_title = sanitize_filename(shot_title)
-                filename = f"{scene} - {shot_type_letter} - {safe_title}.png"
-
-                prompts.append({
-                    'row_index': i,
-                    'scene': scene,
-                    'shot_type': shot_type,
-                    'shot_type_letter': shot_type_letter,
-                    'shot_title': shot_title,
-                    'full_prompt': full_prompt,
-                    'output_filename': filename
-                })
-
-    return prompts
-
-
 def get_batches(prompts: list, batch_size: int) -> list:
-    """Split prompts into batches"""
-    batches = []
-    for i in range(0, len(prompts), batch_size):
-        batches.append(prompts[i:i + batch_size])
-    return batches
+    return [prompts[i:i + batch_size] for i in range(0, len(prompts), batch_size)]
 
 
-def list_batches(prompts: list, batch_size: int, csv_file: str):
-    """List all available batches"""
+def list_batches(prompts: list, batch_size: int, source_file: str):
     batches = get_batches(prompts, batch_size)
-    total_batches = len(batches)
-    total_prompts = len(prompts)
-
     print(f"\n{'='*60}")
-    print(f"CSV File: {csv_file}")
-    print(f"Total prompts: {total_prompts}")
+    print(f"Source: {source_file}")
+    print(f"Total images to generate: {len(prompts)} ({len(prompts)//2} pairs)")
     print(f"Batch size: {batch_size}")
-    print(f"Total batches: {total_batches}")
+    print(f"Total batches: {len(batches)}")
     print(f"{'='*60}\n")
 
     for i, batch in enumerate(batches, start=1):
-        start_idx = batch[0]['row_index']
-        end_idx = batch[-1]['row_index']
-        preview = ", ".join([f"{p['scene']}-{p['shot_type_letter']}" for p in batch[:5]])
-        if len(batch) > 5:
+        categories_in_batch = set(p["safe_category"] for p in batch)
+        labels = [f"{p['id']}-{p['label']}" for p in batch[:4]]
+        preview = ", ".join(labels)
+        if len(batch) > 4:
             preview += "..."
-        print(f"Batch {i}: Rows {start_idx}-{end_idx} ({len(batch)} images)")
+        print(f"Batch {i}: {len(batch)} images  [{', '.join(sorted(categories_in_batch))}]")
         print(f"       {preview}")
         print()
 
-    return total_batches
+    return len(batches)
 
 
 def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: int):
-    """Process a single batch using Gemini batch API"""
     print(f"\n{'='*60}")
     print(f"Processing Batch {batch_num}/{total_batches} ({len(batch)} images)")
     print(f"{'='*60}\n")
 
-    # Prepare batch requests
     batch_requests = []
     task_metadata = []
 
     for item in batch:
-        # Use full prompt directly
-        prompt_text = item['full_prompt']
-
         batch_requests.append({
             "contents": [{
-                "parts": [{"text": prompt_text}],
+                "parts": [{"text": item["prompt"]}],
                 "role": "user"
             }]
         })
+        task_metadata.append(item)
 
-        task_metadata.append({
-            "row_index": item['row_index'],
-            "scene": item['scene'],
-            "shot_type": item['shot_type'],
-            "shot_type_letter": item['shot_type_letter'],
-            "shot_title": item['shot_title'],
-            "full_prompt": prompt_text,
-            "output_filename": item['output_filename']
-        })
-
-    # Create batch job with Gemini 2.5 Flash
     print(f"Creating batch job with Gemini API (50% discount)...")
     try:
         batch_job = client.batches.create(
             model="models/gemini-2.5-flash-image",
             src=batch_requests,
             config={
-                "display_name": f"scene-batch-{batch_num}",
+                "display_name": f"gen-batch-{batch_num}",
             },
         )
 
-        print(f"✓ Created batch job: {batch_job.name}")
-        print(f"Status: {batch_job.state}")
-        print(f"\nWaiting for batch to complete...")
+        print(f"  Created batch job: {batch_job.name}")
+        print(f"  Status: {batch_job.state}")
+        print(f"  Waiting for completion...")
 
-        # Poll for completion
         count = 0
         while True:
             batch_status = client.batches.get(name=batch_job.name)
-            print(f"Status: {batch_status.state.name} ({count})")
+            state = batch_status.state.name
             count += 1
+            if count % 6 == 1:
+                print(f"  Status: {state} (poll #{count})")
 
-            if batch_status.state.name in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
+            if state in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
                 break
 
-            time.sleep(10)  # Check every 10 seconds
+            time.sleep(10)
 
-        if batch_status.state.name == "JOB_STATE_SUCCEEDED":
-            print(f"\n✓ Batch completed successfully!")
+        if batch_status.state.name != "JOB_STATE_SUCCEEDED":
+            print(f"\n  Batch failed: {batch_status.state.name}")
+            return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests)}
 
-            # Process results
-            success_count = 0
-            error_count = 0
+        print(f"\n  Batch completed!")
 
-            if batch_status.dest and batch_status.dest.inlined_responses:
-                print("Processing inline results...")
+        success_count = 0
+        error_count = 0
 
-                for i, inline_response in enumerate(batch_status.dest.inlined_responses):
-                    task = task_metadata[i]
-                    scene = task['scene']
-                    shot_letter = task['shot_type_letter']
-                    title = task['shot_title'][:30]
+        if batch_status.dest and batch_status.dest.inlined_responses:
+            print("  Processing inline results...")
 
-                    print(f"  Processing {scene}-{shot_letter}: {title}...")
+            for i, inline_response in enumerate(batch_status.dest.inlined_responses):
+                task = task_metadata[i]
+                print(f"    [{task['id']}] {task['food_item']} ({task['label']})...", end=" ")
 
-                    # Check for a successful response with image data
-                    if inline_response.response:
-                        try:
-                            image_parts = [
-                                part.inline_data.data
-                                for part in inline_response.response.parts
-                                if part.inline_data
-                            ]
+                # Create category subdirectory
+                cat_dir = os.path.join(output_dir, task["safe_category"])
+                Path(cat_dir).mkdir(exist_ok=True)
 
-                            if image_parts:
-                                # Save the image
-                                image_path = os.path.join(output_dir, task['output_filename'])
+                if inline_response.response:
+                    try:
+                        image_parts = [
+                            part for part in inline_response.response.parts
+                            if part.inline_data
+                        ]
 
-                                # Get the first part with image data
-                                for part in inline_response.response.parts:
-                                    if part.inline_data:
-                                        image = part.as_image()
-                                        image.save(image_path)
-                                        break
+                        if image_parts:
+                            image_path = os.path.join(cat_dir, task["output_filename"])
+                            image = image_parts[0].as_image()
+                            image.save(image_path)
 
-                                # Save prompt info
-                                prompt_file = os.path.join(output_dir, f"{task['output_filename']}.prompt.txt")
-                                with open(prompt_file, 'w', encoding='utf-8') as f:
-                                    f.write(f"Scene: {task['scene']}\n")
-                                    f.write(f"Shot Type: {task['shot_type']}\n")
-                                    f.write(f"Shot Title: {task['shot_title']}\n")
-                                    f.write(f"Filename: {task['output_filename']}\n")
-                                    f.write(f"\nPrompt:\n{task['full_prompt']}\n")
+                            # Save prompt alongside image
+                            prompt_file = os.path.join(cat_dir, f"{task['output_filename']}.prompt.txt")
+                            with open(prompt_file, 'w', encoding='utf-8') as f:
+                                f.write(f"ID: {task['id']}\n")
+                                f.write(f"Category: {task['category']}\n")
+                                f.write(f"Food Item: {task['food_item']}\n")
+                                f.write(f"Label: {task['label']}\n")
+                                f.write(f"Filename: {task['output_filename']}\n")
+                                f.write(f"\nPrompt:\n{task['prompt']}\n")
 
-                                print(f"    ✓ Saved: {task['output_filename']}")
-                                success_count += 1
-                            else:
-                                print(f"    ✗ No image data in response")
-                                error_count += 1
-
-                        except Exception as e:
-                            print(f"    ✗ Error: {e}")
+                            print(f"OK -> {task['safe_category']}/{task['output_filename']}")
+                            success_count += 1
+                        else:
+                            print("NO IMAGE DATA")
                             error_count += 1
-                    elif inline_response.error:
-                        print(f"    ✗ API Error: {inline_response.error}")
+
+                    except Exception as e:
+                        print(f"ERROR: {e}")
                         error_count += 1
-                    else:
-                        print(f"    ✗ No response received")
-                        error_count += 1
+                elif inline_response.error:
+                    print(f"API ERROR: {inline_response.error}")
+                    error_count += 1
+                else:
+                    print("NO RESPONSE")
+                    error_count += 1
 
-            elif batch_status.dest and batch_status.dest.file_name:
-                print(f"Results are in file: {batch_status.dest.file_name}")
-                print("Downloading result file content...")
-                file_content = client.files.download(file=batch_status.dest.file_name)
-
-                output_path = os.path.join(output_dir, f"batch_{batch_num}_results.json")
-                with open(output_path, 'wb') as f:
-                    f.write(file_content)
-
-                print(f"Results downloaded to: {output_path}")
-                success_count = len(batch_requests)
-            else:
-                print("No results found (neither file nor inline).")
-                error_count = len(batch_requests)
-
-            return {
-                'batch_num': batch_num,
-                'success': success_count,
-                'errors': error_count,
-                'total': len(batch_requests)
-            }
-
+        elif batch_status.dest and batch_status.dest.file_name:
+            print(f"  Results in file: {batch_status.dest.file_name}")
+            file_content = client.files.download(file=batch_status.dest.file_name)
+            output_path = os.path.join(output_dir, f"batch_{batch_num}_results.json")
+            with open(output_path, 'wb') as f:
+                f.write(file_content)
+            print(f"  Downloaded to: {output_path}")
+            success_count = len(batch_requests)
         else:
-            print(f"\n✗ Batch failed with status: {batch_status.state.name}")
-            return {
-                'batch_num': batch_num,
-                'success': 0,
-                'errors': len(batch_requests),
-                'total': len(batch_requests)
-            }
+            print("  No results found.")
+            error_count = len(batch_requests)
+
+        return {"batch_num": batch_num, "success": success_count, "errors": error_count, "total": len(batch_requests)}
 
     except Exception as e:
-        print(f"\n✗ Error creating batch job: {e}")
-        return {
-            'batch_num': batch_num,
-            'success': 0,
-            'errors': len(batch_requests),
-            'total': len(batch_requests),
-            'error': str(e)
-        }
+        print(f"\n  Error: {e}")
+        return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests), "error": str(e)}
 
 
-def save_results(output_dir: str, all_results: list, total_prompts: int, csv_file: str):
-    """Save generation results to a file"""
+def save_results(output_dir: str, all_results: list, total_prompts: int, source_file: str):
     results_file = os.path.join(output_dir, "generation_results.txt")
+    total_success = sum(r["success"] for r in all_results)
+    total_errors = sum(r["errors"] for r in all_results)
 
     with open(results_file, 'w', encoding='utf-8') as f:
-        f.write("SCENE BATCH GENERATION RESULTS\n")
+        f.write("BATCH IMAGE GENERATION RESULTS\n")
         f.write(f"Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"CSV File: {csv_file}\n")
-        f.write(f"Total prompts: {total_prompts}\n")
+        f.write(f"Source: {source_file}\n")
+        f.write(f"Total images: {total_prompts} ({total_prompts // 2} pairs)\n")
         f.write(f"{'='*60}\n\n")
 
-        total_success = 0
-        total_errors = 0
-
         for result in all_results:
-            batch_num = result['batch_num']
-            success = result['success']
-            errors = result['errors']
-            total = result['total']
+            f.write(f"Batch {result['batch_num']}: {result['success']}/{result['total']} success")
+            if result.get("error"):
+                f.write(f" | Error: {result['error']}")
+            f.write("\n")
 
-            f.write(f"{'='*60}\n")
-            f.write(f"Batch {batch_num}\n")
-            f.write(f"{'='*60}\n")
-            f.write(f"Success: {success}/{total}\n")
-            f.write(f"Errors: {errors}/{total}\n")
+        f.write(f"\n{'='*60}\n")
+        f.write(f"SUMMARY\n")
+        f.write(f"Success: {total_success}/{total_prompts}\n")
+        f.write(f"Errors: {total_errors}\n")
+        f.write(f"Rate: {total_success/total_prompts*100:.1f}%\n")
+        f.write(f"\n50% cost discount applied via Gemini batch mode.\n")
 
-            if 'error' in result:
-                f.write(f"Error: {result['error']}\n")
-
-            total_success += success
-            total_errors += errors
-
-        f.write(f"\n\n{'='*60}\n")
-        f.write("FINAL SUMMARY\n")
-        f.write(f"{'='*60}\n")
-        f.write(f"Total prompts: {total_prompts}\n")
-        f.write(f"Total success: {total_success}\n")
-        f.write(f"Total errors: {total_errors}\n")
-        f.write(f"Success rate: {total_success/total_prompts*100:.1f}%\n")
-        f.write(f"\nCost savings: 50% discount applied via Gemini batch mode!\n")
-
-    print(f"\n✓ Results saved to: {results_file}")
+    print(f"\n  Results saved to: {results_file}")
 
 
 def main():
-    """Main function"""
     parser = argparse.ArgumentParser(
-        description='Generate scene images using Gemini Batch API'
+        description="Generate paired clean/glyphosate images using Gemini Batch API (50% discount)"
     )
     parser.add_argument(
-        '--csv',
-        type=str,
-        required=True,
-        help='CSV file to read (Scene, Shot_Type, Shot_Title, Full_Prompt format)'
+        "--xlsx", type=str, required=True,
+        help="XLSX file to read (Pairs sheet)"
     )
     parser.add_argument(
-        '--batch',
-        type=str,
-        help='Batch number to generate (e.g., "1") or "all" for all batches'
+        "--batch", type=str,
+        help='Batch number (e.g. "1") or "all"'
     )
     parser.add_argument(
-        '--list',
-        action='store_true',
-        help='List all available batches without generating'
+        "--list", action="store_true",
+        help="List all available batches without generating"
     )
     parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=BATCH_SIZE,
-        help=f'Number of images per batch (default: {BATCH_SIZE}, max: 50 for Gemini)'
+        "--batch-size", type=int, default=BATCH_SIZE,
+        help=f"Images per batch (default: {BATCH_SIZE}, max: 50)"
     )
     parser.add_argument(
-        '--count',
-        type=int,
-        help='Number of images to generate (e.g., 10, 50, 100)'
+        "--count", type=int,
+        help="Number of images to generate (not pairs)"
+    )
+    parser.add_argument(
+        "--label", type=str, choices=["clean", "glyphosate", "both"], default="both",
+        help="Which images to generate (default: both)"
     )
 
     args = parser.parse_args()
 
-    # Validate batch size
     if args.batch_size > 50:
-        print("WARNING: Gemini batch API has a limit of 50 requests per batch.")
-        print(f"Setting batch size to 50.")
+        print("WARNING: Gemini batch API limit is 50. Setting batch size to 50.")
         args.batch_size = 50
 
-    # Check if CSV file exists
-    if not os.path.exists(args.csv):
-        print(f"ERROR: CSV file not found: {args.csv}")
+    if not os.path.exists(args.xlsx):
+        print(f"ERROR: File not found: {args.xlsx}")
         sys.exit(1)
 
-    # Get project name from CSV filename
-    project_name = Path(args.csv).stem
-
-    # Read prompts from CSV
-    print(f"Reading prompts from: {args.csv}")
-    prompts = read_csv_prompts(args.csv)
+    print(f"Reading prompts from: {args.xlsx}")
+    prompts = read_xlsx_prompts(args.xlsx)
 
     if not prompts:
-        print("ERROR: No prompts found in CSV file!")
+        print("ERROR: No prompts found!")
         sys.exit(1)
 
-    print(f"Found {len(prompts)} scenes")
+    # Filter by label if specified
+    if args.label != "both":
+        prompts = [p for p in prompts if p["label"] == args.label]
+        print(f"Filtered to '{args.label}' only: {len(prompts)} images")
 
-    # Handle --count option
+    print(f"Found {len(prompts)} images ({len(prompts)//2} pairs) across "
+          f"{len(set(p['category'] for p in prompts))} categories")
+
     if args.count:
-        if args.count > len(prompts):
-            print(f"WARNING: Requested {args.count} images but only {len(prompts)} available.")
-            print(f"Generating all {len(prompts)} images.")
-            count = len(prompts)
-        else:
-            count = args.count
+        args.count = min(args.count, len(prompts))
+        prompts = prompts[:args.count]
+        print(f"Limited to first {args.count} images")
 
-        prompts = prompts[:count]
-        print(f"Generating first {len(prompts)} images")
-
-    # List batches if requested
     if args.list:
-        list_batches(prompts, args.batch_size, args.csv)
+        list_batches(prompts, args.batch_size, args.xlsx)
         return
 
-    # Get batches
     batches = get_batches(prompts, args.batch_size)
     total_batches = len(batches)
 
-    # Determine which batches to process
-    if args.count:
-        batches_to_process = list(range(total_batches))
-    elif args.batch:
-        if args.batch.lower() == 'all':
+    if args.batch:
+        if args.batch.lower() == "all":
             batches_to_process = list(range(total_batches))
         else:
             try:
                 batch_num = int(args.batch)
                 if batch_num < 1 or batch_num > total_batches:
-                    print(f"ERROR: Batch number must be between 1 and {total_batches}")
-                    list_batches(prompts, args.batch_size, args.csv)
-                    sys.exit(1)
-                batches_to_process = [batch_num - 1]  # Convert to 0-indexed
-            except ValueError:
-                print(f"ERROR: Invalid batch number '{args.batch}'. Use a number or 'all'")
-                sys.exit(1)
-    else:
-        # No batch/count specified, ask user
-        total_batches = list_batches(prompts, args.batch_size, args.csv)
-        user_input = input("\nEnter batch number (1-{}), 'all', or a count: ".format(total_batches)).strip()
-
-        if user_input.lower() == 'all':
-            batches_to_process = list(range(total_batches))
-        else:
-            try:
-                # Try as batch number first
-                batch_num = int(user_input)
-                if batch_num < 1 or batch_num > total_batches:
-                    print(f"ERROR: Batch number must be between 1 and {total_batches}")
+                    print(f"ERROR: Batch number must be 1-{total_batches}")
+                    list_batches(prompts, args.batch_size, args.xlsx)
                     sys.exit(1)
                 batches_to_process = [batch_num - 1]
             except ValueError:
-                # Try as count
+                print(f"ERROR: Invalid batch '{args.batch}'")
+                sys.exit(1)
+    else:
+        list_batches(prompts, args.batch_size, args.xlsx)
+        user_input = input(f"\nEnter batch number (1-{total_batches}), 'all', or count: ").strip()
+
+        if user_input.lower() == "all":
+            batches_to_process = list(range(total_batches))
+        else:
+            try:
+                batch_num = int(user_input)
+                if batch_num < 1 or batch_num > total_batches:
+                    print(f"ERROR: Must be 1-{total_batches}")
+                    sys.exit(1)
+                batches_to_process = [batch_num - 1]
+            except ValueError:
                 try:
                     count = int(user_input)
-                    if count < 1 or count > len(prompts):
-                        print(f"ERROR: Count must be between 1 and {len(prompts)}")
-                        sys.exit(1)
-                    prompts = prompts[:count]
+                    prompts = prompts[:min(count, len(prompts))]
                     batches = get_batches(prompts, args.batch_size)
                     total_batches = len(batches)
                     batches_to_process = list(range(total_batches))
@@ -493,27 +375,23 @@ def main():
                     print(f"ERROR: Invalid input '{user_input}'")
                     sys.exit(1)
 
-    # Create output directory
-    output_dir = create_output_dir(project_name)
+    output_dir = create_output_dir()
     print(f"\nOutput directory: {output_dir}")
 
-    # Process batches
     start_time = time.time()
     all_results = []
 
     for batch_idx in batches_to_process:
         batch = batches[batch_idx]
         batch_num = batch_idx + 1
-
         result = process_batch(batch, output_dir, batch_num, total_batches)
         all_results.append(result)
 
-    # Save results
-    save_results(output_dir, all_results, len(prompts), args.csv)
+    save_results(output_dir, all_results, len(prompts), args.xlsx)
 
-    elapsed_time = time.time() - start_time
-    total_success = sum(r['success'] for r in all_results)
-    total_errors = sum(r['errors'] for r in all_results)
+    elapsed = time.time() - start_time
+    total_success = sum(r["success"] for r in all_results)
+    total_errors = sum(r["errors"] for r in all_results)
 
     print(f"\n{'='*60}")
     print(f"BATCH GENERATION COMPLETE!")
@@ -521,9 +399,9 @@ def main():
     print(f"Total images: {len(prompts)}")
     print(f"Generated: {total_success}")
     print(f"Errors: {total_errors}")
-    print(f"Time elapsed: {elapsed_time:.1f} seconds")
-    print(f"Output directory: {output_dir}")
-    print(f"\nCost savings: 50% discount applied via Gemini batch mode!")
+    print(f"Time: {elapsed:.1f}s")
+    print(f"Output: {output_dir}/")
+    print(f"\n50% cost discount applied via Gemini batch mode!")
 
 
 if __name__ == "__main__":
