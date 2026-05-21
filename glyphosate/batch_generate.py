@@ -31,8 +31,7 @@ client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # Image generation config: 9:16 portrait, 2K, high quality
 IMAGE_CONFIG = types.GenerateContentConfig(
-    responseModalities=["image", "text"],
-    mediaResolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+    responseModalities=["IMAGE"],
     imageConfig=types.ImageConfig(
         aspectRatio="9:16",
     ),
