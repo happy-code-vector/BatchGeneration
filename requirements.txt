@@ -3,6 +3,7 @@ requests
 python-dotenv
 Pillow
 opencv-python
+openpyxl
 selenium
 webdriver-manager
 yt-dlp
