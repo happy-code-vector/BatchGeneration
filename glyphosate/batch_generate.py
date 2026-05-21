@@ -25,8 +25,18 @@ if not os.environ.get("GEMINI_API_KEY"):
     sys.exit(1)
 
 from google import genai
+from google.genai import types
 
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+# Image generation config: 9:16 portrait, 2K, high quality
+IMAGE_CONFIG = types.GenerateContentConfig(
+    responseModalities=["image", "text"],
+    mediaResolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+    imageConfig=types.ImageConfig(
+        aspectRatio="9:16",
+    ),
+)
 
 
 def sanitize_filename(name: str) -> str:
@@ -52,34 +62,26 @@ def read_xlsx_prompts(xlsx_file: str) -> list:
         safe_food = sanitize_filename(food_item)
         safe_category = sanitize_filename(category)
 
-        # Quality suffix appended to every prompt
-        quality_suffix = (
-            "\n\nImage specifications: 9:16 aspect ratio (vertical/portrait orientation), "
-            "2K resolution (1440x2560), highest quality, photorealistic, sharp details."
-        )
-
         if clean_prompt and str(clean_prompt).strip():
-            clean_text = str(clean_prompt).strip() + quality_suffix
             prompts.append({
                 "id": int(row_id),
                 "category": category,
                 "safe_category": safe_category,
                 "food_item": food_item,
                 "safe_food": safe_food,
-                "prompt": clean_text,
+                "prompt": str(clean_prompt).strip(),
                 "label": "clean",
                 "output_filename": f"{row_id}-{safe_food}-clean.png",
             })
 
         if glyphosate_prompt and str(glyphosate_prompt).strip():
-            glyph_text = str(glyphosate_prompt).strip() + quality_suffix
             prompts.append({
                 "id": int(row_id),
                 "category": category,
                 "safe_category": safe_category,
                 "food_item": food_item,
                 "safe_food": safe_food,
-                "prompt": glyph_text,
+                "prompt": str(glyphosate_prompt).strip(),
                 "label": "glyphosate",
                 "output_filename": f"{row_id}-{safe_food}-glyphosate.png",
             })
@@ -130,12 +132,10 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
     task_metadata = []
 
     for item in batch:
-        batch_requests.append({
-            "contents": [{
-                "parts": [{"text": item["prompt"]}],
-                "role": "user"
-            }]
-        })
+        batch_requests.append(types.InlinedRequest(
+            contents=[{"parts": [{"text": item["prompt"]}], "role": "user"}],
+            config=IMAGE_CONFIG,
+        ))
         task_metadata.append(item)
 
     print(f"Creating batch job with Gemini API (50% discount)...")
