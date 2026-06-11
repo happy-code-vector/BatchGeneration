@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BATCH_SIZE = 50
+MAX_RETRIES = 3
 
 if not os.environ.get("GEMINI_API_KEY"):
     print("ERROR: GEMINI_API_KEY environment variable not set!")
@@ -112,12 +113,8 @@ def list_batches(prompts: list, batch_size: int):
 
 def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: int):
     """Process a single batch: submit to Gemini API, poll for completion, save results.
-    Thread-safe: uses tprint() for console output and each thread creates its own client."""
-
-    # Each thread gets its own client to avoid potential thread-safety issues
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
-    tprint(f"\n[Batch {batch_num}/{total_batches}] Submitting {len(batch)} images...")
+    Thread-safe: uses tprint() for console output and each thread creates its own client.
+    Retries up to MAX_RETRIES times on transient network errors."""
 
     batch_requests = []
     task_metadata = []
@@ -129,98 +126,111 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
         ))
         task_metadata.append(item)
 
-    try:
-        batch_job = client.batches.create(
-            model="models/gemini-2.5-flash-image",
-            src=batch_requests,
-            config={
-                "display_name": f"recipes-batch-{batch_num}",
-            },
-        )
+    # Retry loop for transient network errors
+    for attempt in range(1, MAX_RETRIES + 1):
+        # Each attempt gets a fresh client to avoid stale connections
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-        tprint(f"  [Batch {batch_num}] Job created: {batch_job.name}")
+        try:
+            tprint(f"\n[Batch {batch_num}/{total_batches}] Submitting {len(batch)} images (attempt {attempt}/{MAX_RETRIES})...")
 
-        # Poll for completion
-        count = 0
-        while True:
-            batch_status = client.batches.get(name=batch_job.name)
-            state = batch_status.state.name
-            count += 1
-            if count % 6 == 1:
-                tprint(f"  [Batch {batch_num}] {state} (poll #{count})")
+            batch_job = client.batches.create(
+                model="models/gemini-2.5-flash-image",
+                src=batch_requests,
+                config={
+                    "display_name": f"recipes-batch-{batch_num}",
+                },
+            )
 
-            if state in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
-                break
+            tprint(f"  [Batch {batch_num}] Job created: {batch_job.name}")
 
-            time.sleep(10)
+            # Poll for completion
+            count = 0
+            while True:
+                batch_status = client.batches.get(name=batch_job.name)
+                state = batch_status.state.name
+                count += 1
+                if count % 6 == 1:
+                    tprint(f"  [Batch {batch_num}] {state} (poll #{count})")
 
-        if batch_status.state.name != "JOB_STATE_SUCCEEDED":
-            tprint(f"  [Batch {batch_num}] FAILED: {batch_status.state.name}")
-            return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests)}
+                if state in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
+                    break
 
-        tprint(f"  [Batch {batch_num}] Completed! Processing results...")
+                time.sleep(10)
 
-        success_count = 0
-        error_count = 0
+            if batch_status.state.name != "JOB_STATE_SUCCEEDED":
+                tprint(f"  [Batch {batch_num}] FAILED: {batch_status.state.name}")
+                return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests)}
 
-        if batch_status.dest and batch_status.dest.inlined_responses:
-            for i, inline_response in enumerate(batch_status.dest.inlined_responses):
-                task = task_metadata[i]
+            tprint(f"  [Batch {batch_num}] Completed! Processing results...")
 
-                if inline_response.response:
-                    try:
-                        image_parts = [
-                            part for part in inline_response.response.parts
-                            if part.inline_data
-                        ]
+            success_count = 0
+            error_count = 0
 
-                        if image_parts:
-                            image_path = os.path.join(output_dir, task["output_filename"])
-                            image = image_parts[0].as_image()
-                            image.save(image_path)
+            if batch_status.dest and batch_status.dest.inlined_responses:
+                for i, inline_response in enumerate(batch_status.dest.inlined_responses):
+                    task = task_metadata[i]
 
-                            # Save prompt alongside image
-                            prompt_file = os.path.join(output_dir, f"{task['id']}.prompt.txt")
-                            with open(prompt_file, 'w', encoding='utf-8') as f:
-                                f.write(f"Recipe ID: {task['id']}\n")
-                                f.write(f"Recipe Name: {task['recipe_name']}\n")
-                                f.write(f"Filename: {task['output_filename']}\n")
-                                f.write(f"Source: {task['source_file']}\n")
-                                f.write(f"\nPrompt:\n{task['prompt']}\n")
+                    if inline_response.response:
+                        try:
+                            image_parts = [
+                                part for part in inline_response.response.parts
+                                if part.inline_data
+                            ]
 
-                            tprint(f"    [{task['id']}] {task['recipe_name']} -> {task['output_filename']} OK")
-                            success_count += 1
-                        else:
-                            tprint(f"    [{task['id']}] {task['recipe_name']} -> NO IMAGE DATA")
+                            if image_parts:
+                                image_path = os.path.join(output_dir, task["output_filename"])
+                                image = image_parts[0].as_image()
+                                image.save(image_path)
+
+                                # Save prompt alongside image
+                                prompt_file = os.path.join(output_dir, f"{task['id']}.prompt.txt")
+                                with open(prompt_file, 'w', encoding='utf-8') as f:
+                                    f.write(f"Recipe ID: {task['id']}\n")
+                                    f.write(f"Recipe Name: {task['recipe_name']}\n")
+                                    f.write(f"Filename: {task['output_filename']}\n")
+                                    f.write(f"Source: {task['source_file']}\n")
+                                    f.write(f"\nPrompt:\n{task['prompt']}\n")
+
+                                tprint(f"    [{task['id']}] {task['recipe_name']} -> {task['output_filename']} OK")
+                                success_count += 1
+                            else:
+                                tprint(f"    [{task['id']}] {task['recipe_name']} -> NO IMAGE DATA")
+                                error_count += 1
+
+                        except Exception as e:
+                            tprint(f"    [{task['id']}] {task['recipe_name']} -> ERROR: {e}")
                             error_count += 1
-
-                    except Exception as e:
-                        tprint(f"    [{task['id']}] {task['recipe_name']} -> ERROR: {e}")
+                    elif inline_response.error:
+                        tprint(f"    [{task['id']}] {task['recipe_name']} -> API ERROR: {inline_response.error}")
                         error_count += 1
-                elif inline_response.error:
-                    tprint(f"    [{task['id']}] {task['recipe_name']} -> API ERROR: {inline_response.error}")
-                    error_count += 1
-                else:
-                    tprint(f"    [{task['id']}] {task['recipe_name']} -> NO RESPONSE")
-                    error_count += 1
+                    else:
+                        tprint(f"    [{task['id']}] {task['recipe_name']} -> NO RESPONSE")
+                        error_count += 1
 
-        elif batch_status.dest and batch_status.dest.file_name:
-            tprint(f"  [Batch {batch_num}] Results in file: {batch_status.dest.file_name}")
-            file_content = client.files.download(file=batch_status.dest.file_name)
-            output_path = os.path.join(output_dir, f"batch_{batch_num}_results.json")
-            with open(output_path, 'wb') as f:
-                f.write(file_content)
-            success_count = len(batch_requests)
-        else:
-            tprint(f"  [Batch {batch_num}] No results found.")
-            error_count = len(batch_requests)
+            elif batch_status.dest and batch_status.dest.file_name:
+                tprint(f"  [Batch {batch_num}] Results in file: {batch_status.dest.file_name}")
+                file_content = client.files.download(file=batch_status.dest.file_name)
+                output_path = os.path.join(output_dir, f"batch_{batch_num}_results.json")
+                with open(output_path, 'wb') as f:
+                    f.write(file_content)
+                success_count = len(batch_requests)
+            else:
+                tprint(f"  [Batch {batch_num}] No results found.")
+                error_count = len(batch_requests)
 
-        tprint(f"  [Batch {batch_num}] Done: {success_count}/{len(batch_requests)} success")
-        return {"batch_num": batch_num, "success": success_count, "errors": error_count, "total": len(batch_requests)}
+            tprint(f"  [Batch {batch_num}] Done: {success_count}/{len(batch_requests)} success")
+            return {"batch_num": batch_num, "success": success_count, "errors": error_count, "total": len(batch_requests)}
 
-    except Exception as e:
-        tprint(f"  [Batch {batch_num}] Error: {e}")
-        return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests), "error": str(e)}
+        except Exception as e:
+            tprint(f"  [Batch {batch_num}] Error (attempt {attempt}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES:
+                backoff = 2 ** attempt  # 2s, 4s, 8s...
+                tprint(f"  [Batch {batch_num}] Retrying in {backoff}s...")
+                time.sleep(backoff)
+            else:
+                tprint(f"  [Batch {batch_num}] All {MAX_RETRIES} attempts failed.")
+                return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests), "error": str(e)}
 
 
 def save_results(output_dir: str, all_results: list, total_prompts: int, csv_files: list):
