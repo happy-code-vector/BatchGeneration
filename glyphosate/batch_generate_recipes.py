@@ -44,9 +44,9 @@ _print_lock = threading.Lock()
 
 
 def tprint(*args, **kwargs):
-    """Thread-safe print"""
+    """Thread-safe print with flush to avoid buffered output"""
     with _print_lock:
-        print(*args, **kwargs)
+        print(*args, **kwargs, flush=True)
 
 
 def read_csv_prompts(csv_files: list) -> list:
@@ -150,8 +150,8 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
                 batch_status = client.batches.get(name=batch_job.name)
                 state = batch_status.state.name
                 count += 1
-                if count % 6 == 1:
-                    tprint(f"  [Batch {batch_num}] {state} (poll #{count})")
+                if count % 3 == 1:
+                    tprint(f"  [Batch {batch_num}] {state} (poll #{count}, {count*10}s elapsed)")
 
                 if state in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
                     break
