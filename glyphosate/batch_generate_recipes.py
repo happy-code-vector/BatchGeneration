@@ -2,15 +2,19 @@
 Batch Image Generation for Recipe CSVs using Gemini Batch API (50% discount)
 Reads from image_prompts_recipes_*.csv files
 Outputs images named by recipe_id (e.g. 1.png, 2.png, ...)
+
+Supports parallel batch processing via --workers flag.
+All batch jobs are submitted concurrently and polled in parallel.
 """
 
 import os
 import sys
-import re
 import csv
 import time
 import datetime
 import argparse
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -26,8 +30,6 @@ if not os.environ.get("GEMINI_API_KEY"):
 from google import genai
 from google.genai import types
 
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-
 # Image generation config: 1:1 square (matches the prompt's --ar 1:1)
 IMAGE_CONFIG = types.GenerateContentConfig(
     responseModalities=["IMAGE"],
@@ -35,6 +37,15 @@ IMAGE_CONFIG = types.GenerateContentConfig(
         aspectRatio="1:1",
     ),
 )
+
+# Thread-safe print lock
+_print_lock = threading.Lock()
+
+
+def tprint(*args, **kwargs):
+    """Thread-safe print"""
+    with _print_lock:
+        print(*args, **kwargs)
 
 
 def read_csv_prompts(csv_files: list) -> list:
@@ -100,9 +111,13 @@ def list_batches(prompts: list, batch_size: int):
 
 
 def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: int):
-    print(f"\n{'='*60}")
-    print(f"Processing Batch {batch_num}/{total_batches} ({len(batch)} images)")
-    print(f"{'='*60}\n")
+    """Process a single batch: submit to Gemini API, poll for completion, save results.
+    Thread-safe: uses tprint() for console output and each thread creates its own client."""
+
+    # Each thread gets its own client to avoid potential thread-safety issues
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+    tprint(f"\n[Batch {batch_num}/{total_batches}] Submitting {len(batch)} images...")
 
     batch_requests = []
     task_metadata = []
@@ -114,7 +129,6 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
         ))
         task_metadata.append(item)
 
-    print(f"Creating batch job with Gemini API (50% discount)...")
     try:
         batch_job = client.batches.create(
             model="models/gemini-2.5-flash-image",
@@ -124,17 +138,16 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
             },
         )
 
-        print(f"  Created batch job: {batch_job.name}")
-        print(f"  Status: {batch_job.state}")
-        print(f"  Waiting for completion...")
+        tprint(f"  [Batch {batch_num}] Job created: {batch_job.name}")
 
+        # Poll for completion
         count = 0
         while True:
             batch_status = client.batches.get(name=batch_job.name)
             state = batch_status.state.name
             count += 1
             if count % 6 == 1:
-                print(f"  Status: {state} (poll #{count})")
+                tprint(f"  [Batch {batch_num}] {state} (poll #{count})")
 
             if state in ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
                 break
@@ -142,20 +155,17 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
             time.sleep(10)
 
         if batch_status.state.name != "JOB_STATE_SUCCEEDED":
-            print(f"\n  Batch failed: {batch_status.state.name}")
+            tprint(f"  [Batch {batch_num}] FAILED: {batch_status.state.name}")
             return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests)}
 
-        print(f"\n  Batch completed!")
+        tprint(f"  [Batch {batch_num}] Completed! Processing results...")
 
         success_count = 0
         error_count = 0
 
         if batch_status.dest and batch_status.dest.inlined_responses:
-            print("  Processing inline results...")
-
             for i, inline_response in enumerate(batch_status.dest.inlined_responses):
                 task = task_metadata[i]
-                print(f"    [{task['id']}] {task['recipe_name']}...", end=" ")
 
                 if inline_response.response:
                     try:
@@ -178,38 +188,38 @@ def process_batch(batch: list, output_dir: str, batch_num: int, total_batches: i
                                 f.write(f"Source: {task['source_file']}\n")
                                 f.write(f"\nPrompt:\n{task['prompt']}\n")
 
-                            print(f"OK -> {task['output_filename']}")
+                            tprint(f"    [{task['id']}] {task['recipe_name']} -> {task['output_filename']} OK")
                             success_count += 1
                         else:
-                            print("NO IMAGE DATA")
+                            tprint(f"    [{task['id']}] {task['recipe_name']} -> NO IMAGE DATA")
                             error_count += 1
 
                     except Exception as e:
-                        print(f"ERROR: {e}")
+                        tprint(f"    [{task['id']}] {task['recipe_name']} -> ERROR: {e}")
                         error_count += 1
                 elif inline_response.error:
-                    print(f"API ERROR: {inline_response.error}")
+                    tprint(f"    [{task['id']}] {task['recipe_name']} -> API ERROR: {inline_response.error}")
                     error_count += 1
                 else:
-                    print("NO RESPONSE")
+                    tprint(f"    [{task['id']}] {task['recipe_name']} -> NO RESPONSE")
                     error_count += 1
 
         elif batch_status.dest and batch_status.dest.file_name:
-            print(f"  Results in file: {batch_status.dest.file_name}")
+            tprint(f"  [Batch {batch_num}] Results in file: {batch_status.dest.file_name}")
             file_content = client.files.download(file=batch_status.dest.file_name)
             output_path = os.path.join(output_dir, f"batch_{batch_num}_results.json")
             with open(output_path, 'wb') as f:
                 f.write(file_content)
-            print(f"  Downloaded to: {output_path}")
             success_count = len(batch_requests)
         else:
-            print("  No results found.")
+            tprint(f"  [Batch {batch_num}] No results found.")
             error_count = len(batch_requests)
 
+        tprint(f"  [Batch {batch_num}] Done: {success_count}/{len(batch_requests)} success")
         return {"batch_num": batch_num, "success": success_count, "errors": error_count, "total": len(batch_requests)}
 
     except Exception as e:
-        print(f"\n  Error: {e}")
+        tprint(f"  [Batch {batch_num}] Error: {e}")
         return {"batch_num": batch_num, "success": 0, "errors": len(batch_requests), "total": len(batch_requests), "error": str(e)}
 
 
@@ -238,7 +248,7 @@ def save_results(output_dir: str, all_results: list, total_prompts: int, csv_fil
         f.write(f"Rate: {total_success/total_prompts*100:.1f}%\n")
         f.write(f"\n50% cost discount applied via Gemini batch mode.\n")
 
-    print(f"\n  Results saved to: {results_file}")
+    print(f"\nResults saved to: {results_file}")
 
 
 def main():
@@ -272,6 +282,10 @@ def main():
     parser.add_argument(
         "--end-id", type=int,
         help="End at this recipe_id (inclusive)"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=4,
+        help="Number of parallel batch workers (default: 4). Each worker submits and polls its own batch job concurrently."
     )
 
     args = parser.parse_args()
@@ -365,16 +379,46 @@ def main():
                     sys.exit(1)
 
     output_dir = create_output_dir()
-    print(f"\nOutput directory: {output_dir}")
+    num_workers = min(args.workers, len(batches_to_process))
+
+    print(f"\n{'='*60}")
+    print(f"Output directory: {output_dir}")
+    print(f"Workers: {num_workers}")
+    print(f"Batches to process: {len(batches_to_process)}")
+    print(f"{'='*60}")
 
     start_time = time.time()
     all_results = []
 
-    for batch_idx in batches_to_process:
-        batch = batches[batch_idx]
-        batch_num = batch_idx + 1
-        result = process_batch(batch, output_dir, batch_num, total_batches)
-        all_results.append(result)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(
+                process_batch,
+                batches[batch_idx],
+                output_dir,
+                batch_idx + 1,
+                total_batches,
+            ): batch_idx
+            for batch_idx in batches_to_process
+        }
+
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                all_results.append(result)
+            except Exception as e:
+                batch_idx = futures[future]
+                tprint(f"  [Batch {batch_idx + 1}] Thread error: {e}")
+                all_results.append({
+                    "batch_num": batch_idx + 1,
+                    "success": 0,
+                    "errors": len(batches[batch_idx]),
+                    "total": len(batches[batch_idx]),
+                    "error": str(e),
+                })
+
+    # Sort results by batch number for consistent reporting
+    all_results.sort(key=lambda r: r["batch_num"])
 
     save_results(output_dir, all_results, len(prompts), csv_files)
 
@@ -389,6 +433,7 @@ def main():
     print(f"Generated: {total_success}")
     print(f"Errors: {total_errors}")
     print(f"Time: {elapsed:.1f}s")
+    print(f"Workers: {num_workers}")
     print(f"Output: {output_dir}/")
     print(f"\n50% cost discount applied via Gemini batch mode!")
 
